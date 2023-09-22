@@ -28,6 +28,7 @@
 #include <rte_random.h>
 #include <rte_debug.h>
 #include <rte_ether.h>
+#include <rte_ip.h>
 #include <rte_ethdev.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
@@ -71,6 +72,18 @@ struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 static unsigned int l2fwd_rx_queue_per_lcore = 2; // RX queues per lcore
 
 
+
+// struct flow{
+//         u_int32_t  fs_srcaddr[4];	/* source IPv4/IPv6 address */
+// 	u_int32_t  fs_dstaddr[4];	/* destination IPv4/IPv6 address */
+// 	u_int16_t  fs_sport;		/* source port */
+// 	u_int16_t  fs_dport;		/* destination port */
+// 	u_int8_t   fs_ipver;		/* IP version, 4 or 6 */
+// 	u_int8_t   fs_prot;		/* IP protocol */
+// 	u_int16_t  fs_pad;
+// }
+
+
 /* Per-port statistics struct */
 struct l2fwd_port_statistics {
 	uint64_t tx;
@@ -78,6 +91,56 @@ struct l2fwd_port_statistics {
 	uint64_t dropped;
 } __rte_cache_aligned;
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
+
+
+static void process_packet(struct rte_mbuf *pkt){
+        
+        char abuf[INET6_ADDRSTRLEN];
+        struct rte_ipv4_hdr *ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+        
+        printf("new packet \n\n");
+        printf("%u",ipv4_hdr->dst_addr);
+        /*
+        if(ipv4_hdr!=NULL){
+                printf("Packet Src:%s ", inet_ntop(AF_INET, &ipv4_hdr->src_addr, abuf, sizeof(abuf)));
+                printf("Dst:%s ", inet_ntop(AF_INET, &ipv4_hdr->dst_addr, abuf, sizeof(abuf)));
+                printf("Src port:%hu,Dst port:%hu ", rte_bswap16(*(uint16_t *)(ipv4_hdr + 1)), rte_bswap16(*((uint16_t *)(ipv4_hdr + 1) + 1)));
+        }*/
+        printf("\n\n");
+        
+        
+        
+}
+
+#include <time.h>
+
+#define max_number_of_flows_in_a_window 99999
+
+void detect(unsigned int *v,unsigned int *time,unsigned int window_size){
+        clock_t start_time, end_time;
+        double time_elapsed;
+        int **window_buffer;
+        window_buffer = (int **) malloc (window_size * sizeof(int *));
+        for (int i = 0; i < window_size; i++) {
+                window_buffer[i] = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
+        }
+        
+        start_time = clock();
+        
+        int i=0;
+        while(1==1){
+                while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1)
+                        end_time = clock();
+                        
+                i++; // a time interval passed
+                if (i%window_size==0){
+                        // window size reached
+
+                        i=0;
+                }
+        }
+}
+
 
 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
@@ -146,8 +209,7 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         rte_eth_promiscuous_enable(port);
 
 
-        printf("Port %u: \n\n",
-			port);
+        printf("Port %u: \n\n", port);
 
 	/* initialize port stats */
 	memset(&port_statistics, 0, sizeof(port_statistics));
@@ -156,11 +218,6 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
         return 0;
 }
-
-
-
-
-
 
 
 /*
@@ -207,24 +264,48 @@ static int lcore_main(__rte_unused void *dummy){
 
 	}
 
-        while(!force_quit){
-                for (i = 0; i < qconf->n_rx_port; i++) {
+        clock_t start_time, end_time;
+        double time_elapsed;
+        int window_size = 10;
+        int **window_buffer;
+        window_buffer = (int **) malloc (window_size * sizeof(int *));
+        for (i = 0; i < window_size; i++) {
+                window_buffer[i] = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
+        }
+        
+        i=0;
 
-			port = qconf->rx_port_list[i];
-			nb_rx = rte_eth_rx_burst(port, 0, pkts_burst, MAX_PKT_BURST);
-
-			if (unlikely(nb_rx == 0))
-				continue;
-
-			port_statistics[port].rx += nb_rx;
-
-
-                        // processing packets
-			for (j = 0; j < nb_rx; j++) {
-				m = pkts_burst[j];
-				rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
-			}
-		}
+        while(!force_quit){        
+                start_time = clock();
+                int number_of_packets_in_a_window = 0;
+                while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
+                        // recieving packets
+                        for (i = 0; i < qconf->n_rx_port; i++) {
+                                port = qconf->rx_port_list[i];
+                                nb_rx = rte_eth_rx_burst(port, 0, pkts_burst, MAX_PKT_BURST);
+                                if (unlikely(nb_rx == 0))
+                                        continue;
+                                // port_statistics[port].rx += nb_rx;
+                                // processing packets
+                                for (j = 0; j < nb_rx; j++) {
+                                        m = pkts_burst[j];
+                                        // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
+                                        // process_packet(m);
+                                }
+                                number_of_packets_in_a_window += nb_rx;
+                        }
+                        end_time = clock();
+                }
+                // a time interval passed
+                printf("Number of packets in current time window: %u\n",number_of_packets_in_a_window);
+                i++;
+                if (i%window_size==0){
+                        // window size reached
+                        printf("############ window size reached #############");
+                        i=0;
+                }
+                
+                
         }
 
         return 0;
@@ -302,7 +383,7 @@ int main(int argc, char *argv[])
         if (nb_ports==0)
                 rte_exit(EXIT_FAILURE, "No Ethernet ports\n");
 
-        /* Creates a new mbuf mempool in memory to hold the mbufs objects ( that store packets).
+        /* Creates a new mbuf mempool in memory to hold the mbufs objects (that store packets).
         containts NUM_MBUFS * nb_ports of mbuf pkts in it with each of them's size is RTE_MBUF_DEFAULT_BUF_SIZE
         a cache of 
         Each lcore cache will be MBUF_CACHE_SIZE
