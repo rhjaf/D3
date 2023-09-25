@@ -114,35 +114,9 @@ static void process_packet(struct rte_mbuf *pkt){
 
 #include <time.h>
 
-#define max_number_of_flows_in_a_window 99999
+#define max_number_of_flows_in_a_window 200
 
-void detect(unsigned int *v,unsigned int *time,unsigned int window_size){
-        clock_t start_time, end_time;
-        double time_elapsed;
-        int **window_buffer;
-        window_buffer = (int **) malloc (window_size * sizeof(int *));
-        for (int i = 0; i < window_size; i++) {
-                window_buffer[i] = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
-        }
-        
-        start_time = clock();
-        
-        int i=0;
-        while(1==1){
-                while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1)
-                        end_time = clock();
-                        
-                i++; // a time interval passed
-                if (i%window_size==0){
-                        // window size reached
-
-                        i=0;
-                }
-        }
-}
-
-
-
+ 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
@@ -220,6 +194,14 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 }
 
 
+// Comparison function for qsort
+int compare(const void *a, const void *b) {
+    int *x = (int *)a;
+    int *y = (int *)b;
+    return *x - *y;
+}
+
+
 /*
  * The lcore main. This is the main thread that does the work, reading from
  * an input port and exports flows.
@@ -268,27 +250,87 @@ static int lcore_main(__rte_unused void *dummy){
         double time_elapsed;
         int window_size = 10;
         int **window_buffer;
+        /*
         window_buffer = (int **) malloc (window_size * sizeof(int *));
-        for (i = 0; i < window_size; i++) {
+        for (i = 0; i < window_size; i++) 
                 window_buffer[i] = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
+        for(int k=0;k<window_size;k++){
+                for(int l=0;l<max_number_of_flows_in_a_window;l++)
+                        window_buffer[k][l] = 1;
         }
-        
+        */
+
         i=0;
+
+        int c = 0; // window size bond
+
+        struct rte_ipv4_hdr *ipv4_hdr;
+        struct rte_mbuf *pkt;
+        
+        int p = 10; // training phases
+        int v_max = 0;
+        int v_min = -1;
 
         while(!force_quit){        
                 start_time = clock();
+                end_time = clock();
                 int number_of_packets_in_a_window = 0;
+
+                window_buffer = (int **) malloc (window_size * sizeof(int *));
+                int *v = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
+                int sum = 0;
+                int v_tmp = 0;
+                // trainning
+                while(c<p){
+                        sum = 0;
+                        v_temp = 0;
+                        while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
+                                // recieving packets
+                                for (i = 0; i < qconf->n_rx_port; i++) {
+                                        port = qconf->rx_port_list[i];
+                                        nb_rx = rte_eth_rx_burst(port, 0, pkts_burst, MAX_PKT_BURST);
+                                        if (unlikely(nb_rx == 0))
+                                                continue;
+                                        port_statistics[port].rx += nb_rx;
+                                        // processing packets
+                                        for (j = 0; j < nb_rx; j++) {
+                                                pkt = pkts_burst[j];
+                                                ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+
+                                                v[ipv4_hdr->dst_addr % max_number_of_flows_in_a_window]++;
+                                                // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
+                                                // process_packet(m);
+                                        }
+                                        number_of_packets_in_a_window += nb_rx;
+                                }
+                                end_time = clock();
+                        }
+                        qsort(v, max_number_of_flows_in_a_window, sizeof(int), compare);
+                        for(int t=0;t<max_number_of_flows_in_a_window;t++)
+                                sum+=v[t] *  (max_number_of_flows_in_a_window-t);
+                        v_temp = sum / (max_number_of_flows_in_a_window*(max_number_of_flows_in_a_window-1))
+                        v_temp /= 2
+                        if (v>v_max)
+                                v_max = v_temp
+                        else if(v<v_min)
+                                v_min = v_temp
+                        // a time interval passed
+                }
+
+
                 while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
-                        // recieving packets
+                                // recieving packets
                         for (i = 0; i < qconf->n_rx_port; i++) {
                                 port = qconf->rx_port_list[i];
                                 nb_rx = rte_eth_rx_burst(port, 0, pkts_burst, MAX_PKT_BURST);
                                 if (unlikely(nb_rx == 0))
                                         continue;
-                                // port_statistics[port].rx += nb_rx;
+                                port_statistics[port].rx += nb_rx;
                                 // processing packets
                                 for (j = 0; j < nb_rx; j++) {
-                                        m = pkts_burst[j];
+                                        pkt = pkts_burst[j];
+                                        ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+                                        // window_buffer[c][ipv4_hdr->dst_addr % max_number_of_flows_in_a_window]++;
                                         // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
                                         // process_packet(m);
                                 }
@@ -296,17 +338,22 @@ static int lcore_main(__rte_unused void *dummy){
                         }
                         end_time = clock();
                 }
-                // a time interval passed
+
+    
                 printf("Number of packets in current time window: %u\n",number_of_packets_in_a_window);
-                i++;
-                if (i%window_size==0){
+                c++;
+                if (c%window_size==0){
                         // window size reached
-                        printf("############ window size reached #############");
-                        i=0;
+                        c=0;
                 }
                 
                 
         }
+        */
+        printf("number of rows: %lu\n",sizeof(window_buffer) / sizeof(window_buffer[0]));
+        printf("number of columns: %lu\n",sizeof(window_buffer[0]) / sizeof(window_buffer[0][0]));
+        printf("max number of flows:%lu\n",max_number_of_flows_in_a_window + 1);
+        printf("max number of flows:%i\n",max_number_of_flows_in_a_window + 1);
 
         return 0;
 }
