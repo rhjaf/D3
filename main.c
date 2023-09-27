@@ -269,7 +269,9 @@ static int lcore_main(__rte_unused void *dummy){
         
         int p = 10; // training phases
         int v_max = 0;
-        int v_min = -1;
+        int v_min = INT_MAX;
+
+        bool training = true;
 
         while(!force_quit){        
                 start_time = clock();
@@ -277,13 +279,13 @@ static int lcore_main(__rte_unused void *dummy){
                 int number_of_packets_in_a_window = 0;
 
                 window_buffer = (int **) malloc (window_size * sizeof(int *));
-                int *v = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
+                int *v = (int *)malloc(max_number_of_flows_in_a_window * sizeof(unsigned int));
                 int sum = 0;
                 int v_tmp = 0;
                 // trainning
-                while(c<p){
+                while(c<p && training){
                         sum = 0;
-                        v_temp = 0;
+                        v_tmp = 0;
                         while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
                                 // recieving packets
                                 for (i = 0; i < qconf->n_rx_port; i++) {
@@ -298,6 +300,7 @@ static int lcore_main(__rte_unused void *dummy){
                                                 ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
 
                                                 v[ipv4_hdr->dst_addr % max_number_of_flows_in_a_window]++;
+                                                printf(" bucket %i incremented \n",ipv4_hdr->dst_addr % max_number_of_flows_in_a_window);
                                                 // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
                                                 // process_packet(m);
                                         }
@@ -305,19 +308,33 @@ static int lcore_main(__rte_unused void *dummy){
                                 }
                                 end_time = clock();
                         }
-                        qsort(v, max_number_of_flows_in_a_window, sizeof(int), compare);
+                        
+                        // a time interval passed
+                        qsort(v, max_number_of_flows_in_a_window, sizeof(unsigned int), compare);
                         for(int t=0;t<max_number_of_flows_in_a_window;t++)
                                 sum+=v[t] *  (max_number_of_flows_in_a_window-t);
-                        v_temp = sum / (max_number_of_flows_in_a_window*(max_number_of_flows_in_a_window-1))
-                        v_temp /= 2
-                        if (v>v_max)
-                                v_max = v_temp
-                        else if(v<v_min)
-                                v_min = v_temp
-                        // a time interval passed
+                        v_tmp = sum / (max_number_of_flows_in_a_window*(max_number_of_flows_in_a_window-1));
+                        v_tmp /= 2;
+                        if (v_tmp>v_max)
+                                v_max = v_tmp;
+                        else if(v_tmp<v_min)
+                                v_min = v_tmp;
+                        for(int index=0;index<max_number_of_flows_in_a_window;index++)
+                                printf("index %i: %u\n",index,v[index]);
+                        printf("#####\n#####\n#####\n");
+                        c++;
                 }
+                
+                if (training == true){
+                        printf("#####\n#####\ntrainning phase finished: \n");
+                        c = 0;
+                        training = false;
+                        printf("v_max = %i\n",v_max);
+                        printf("v_min = %i\n",v_min);
+                }
+                
 
-
+                // testing
                 while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
                                 // recieving packets
                         for (i = 0; i < qconf->n_rx_port; i++) {
@@ -349,7 +366,6 @@ static int lcore_main(__rte_unused void *dummy){
                 
                 
         }
-        */
         printf("number of rows: %lu\n",sizeof(window_buffer) / sizeof(window_buffer[0]));
         printf("number of columns: %lu\n",sizeof(window_buffer[0]) / sizeof(window_buffer[0][0]));
         printf("max number of flows:%lu\n",max_number_of_flows_in_a_window + 1);
