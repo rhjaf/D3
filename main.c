@@ -12,6 +12,8 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <math.h>
+#include <time.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -35,32 +37,24 @@
 
 
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
-
-
+#define MAX_RX_QUEUE_PER_LCORE 16
+#define MAX_TX_QUEUE_PER_PORT 16
 #define RX_DESC_DEFAULT 1024
 #define TX_DESC_DEFAULT 1024
-static uint16_t nb_rxd = RX_DESC_DEFAULT;
-// #define TX_RING_SIZE 1024
-
 #define MBUF_CACHE_SIZE 256
-#define MAX_PKT_BURST 32 // number of packets to recevie / transfer in a burs
+#define MAX_PKT_BURST 32 
+#define max_number_of_flows_in_a_interval 200
 
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
 static volatile bool force_quit;
-
 static int promiscuous_on = 1;
-
-
 static const struct rte_eth_conf port_conf_default = {
         .rxmode = {
                 .max_lro_pkt_size = RTE_ETHER_MAX_LEN,
         },
 };
-
 struct rte_mempool *mbuf_pool = NULL;
 
-
-#define MAX_RX_QUEUE_PER_LCORE 16
-#define MAX_TX_QUEUE_PER_PORT 16
 /* List of queues to be polled for a given lcore. 8< */
 struct lcore_queue_conf {
 	unsigned n_rx_port;
@@ -68,21 +62,7 @@ struct lcore_queue_conf {
 } __rte_cache_aligned;
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-
 static unsigned int l2fwd_rx_queue_per_lcore = 2; // RX queues per lcore
-
-
-
-// struct flow{
-//         u_int32_t  fs_srcaddr[4];	/* source IPv4/IPv6 address */
-// 	u_int32_t  fs_dstaddr[4];	/* destination IPv4/IPv6 address */
-// 	u_int16_t  fs_sport;		/* source port */
-// 	u_int16_t  fs_dport;		/* destination port */
-// 	u_int8_t   fs_ipver;		/* IP version, 4 or 6 */
-// 	u_int8_t   fs_prot;		/* IP protocol */
-// 	u_int16_t  fs_pad;
-// }
-
 
 /* Per-port statistics struct */
 struct l2fwd_port_statistics {
@@ -93,51 +73,34 @@ struct l2fwd_port_statistics {
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 
-static void process_packet(struct rte_mbuf *pkt){
-        
-        char abuf[INET6_ADDRSTRLEN];
-        struct rte_ipv4_hdr *ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
-        
-        printf("new packet \n\n");
-        printf("%u",ipv4_hdr->dst_addr);
-        /*
-        if(ipv4_hdr!=NULL){
-                printf("Packet Src:%s ", inet_ntop(AF_INET, &ipv4_hdr->src_addr, abuf, sizeof(abuf)));
-                printf("Dst:%s ", inet_ntop(AF_INET, &ipv4_hdr->dst_addr, abuf, sizeof(abuf)));
-                printf("Src port:%hu,Dst port:%hu ", rte_bswap16(*(uint16_t *)(ipv4_hdr + 1)), rte_bswap16(*((uint16_t *)(ipv4_hdr + 1) + 1)));
-        }*/
-        printf("\n\n");
-        
-        
-        
+// Comparison function for qsort
+int compare(const void *a, const void *b) {
+    int *x = (int *)a;
+    int *y = (int *)b;
+    return *x - *y;
 }
 
-#include <time.h>
-
-#define max_number_of_flows_in_a_window 200
+int find_max(const unsigned int *arr){
+        int arr_len = sizeof(arr) / sizeof(arr[0]);
+        int max = arr[0];
+        for(int i=0;i<arr_len;i++)
+                max = arr[i]>max?arr[i]:max;
+        return max;
+}
 
  
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
         const uint16_t rx_rings = 1;
-        // const uint16_t tx_rings = 1;
-        // uint16_t nb_txd = TX_RING_SIZE;
         int retval;
         uint16_t q;
-        struct rte_eth_dev_info dev_info;
-        // struct rte_eth_txconf txconf;
 
         if (!rte_eth_dev_is_valid_port(port))
                 return -1;
-
-        rte_eth_dev_info_get(port, &dev_info);
-        //if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
-        //        port_conf.txmode.offloads |=
-        //                DEV_TX_OFFLOAD_MBUF_FAST_FREE;
-
+        
         /* Configure the Ethernet device. */
-        // change zero to tx_ring if you want
+        // number of tx rings set to zero
         retval = rte_eth_dev_configure(port, rx_rings, 0, &port_conf);
         if (retval != 0)
                 return retval;
@@ -152,18 +115,7 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
                 if (retval < 0)
                         return retval;
         }
-        /*
-        txconf = dev_info.default_txconf;
-        txconf.offloads = port_conf.txmode.offloads;
-        // Allocate and set up 1 TX queue per Ethernet port.
-        for (q = 0; q < tx_rings; q++) {
-                retval = rte_eth_tx_queue_setup(port, q, nb_txd,
-                                rte_eth_dev_socket_id(port), &txconf);
-                if (retval < 0)
-                        return retval;
-        }
-        */
-        
+                
         /* Start the Ethernet port. */
         retval = rte_eth_dev_start(port);
         if (retval < 0)
@@ -188,23 +140,13 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	/* initialize port stats */
 	memset(&port_statistics, 0, sizeof(port_statistics));
 
-
-
         return 0;
-}
-
-
-// Comparison function for qsort
-int compare(const void *a, const void *b) {
-    int *x = (int *)a;
-    int *y = (int *)b;
-    return *x - *y;
 }
 
 
 /*
  * The lcore main. This is the main thread that does the work, reading from
- * an input port and exports flows.
+ * an input port, and do processing on the metrics.
  */
 static int lcore_main(__rte_unused void *dummy){
 
@@ -214,22 +156,8 @@ static int lcore_main(__rte_unused void *dummy){
         unsigned i,j, port, lcore_id, nb_rx;
        	struct lcore_queue_conf *qconf;
 
-
-        /* It is a performance measurement
-         * Check that the port is on the same NUMA node as the polling thread
-         * for best performance.
-         */
-        RTE_ETH_FOREACH_DEV(port)
-                if (rte_eth_dev_socket_id(port) > 0 &&
-                                rte_eth_dev_socket_id(port) !=
-                                                (int)rte_socket_id())
-                        printf("WARNING, port %u is on remote NUMA node to "
-                                        "polling thread.\n\tPerformance will "
-                                        "not be optimal.\n", port);
-
        	lcore_id = rte_lcore_id();
         qconf = &lcore_queue_conf[lcore_id];
-
 
         if (qconf->n_rx_port == 0) {
 		RTE_LOG(INFO, DDD, "lcore %u has nothing to do\n", lcore_id);
@@ -239,53 +167,42 @@ static int lcore_main(__rte_unused void *dummy){
 	RTE_LOG(INFO, DDD, "entering main loop on lcore %u\n", lcore_id);
 
 	for (i = 0; i < qconf->n_rx_port; i++) {
-
 		port = qconf->rx_port_list[i];
-		RTE_LOG(INFO, DDD, " -- lcoreid=%u portid=%u\n", lcore_id,
-			port);
+		RTE_LOG(INFO, DDD, " -- lcoreid=%u portid=%u\n", lcore_id, port);
 
 	}
+
 
         clock_t start_time, end_time;
         double time_elapsed;
         int window_size = 10;
-        int **window_buffer;
-        /*
-        window_buffer = (int **) malloc (window_size * sizeof(int *));
-        for (i = 0; i < window_size; i++) 
-                window_buffer[i] = (int *)malloc(max_number_of_flows_in_a_window * sizeof(int));
-        for(int k=0;k<window_size;k++){
-                for(int l=0;l<max_number_of_flows_in_a_window;l++)
-                        window_buffer[k][l] = 1;
-        }
-        */
-
-        i=0;
-
-        int c = 0; // window size bond
-
+        int window_buffer[window_size];
+        unsigned int* interval_buffer;
+        int c = 0; // interval counter
         struct rte_ipv4_hdr *ipv4_hdr;
         struct rte_mbuf *pkt;
-        
-        int p = 10; // training phases
+        int p = 100; // training phases
         int v_max = 0;
         int v_min = INT_MAX;
-
-        bool training = true;
-
+        bool training = true;      
+        i=0;
+        double r_var,r_l,r_mean,r_sd,r_u;
+        int sum,number_of_packets_in_a_interval,window_sum,window_throughput,v_act,v_pred,r_pred,r_size=0,r_sum=0;
         while(!force_quit){        
                 start_time = clock();
                 end_time = clock();
-                int number_of_packets_in_a_window = 0;
+                number_of_packets_in_a_interval = 0;
+                interval_buffer = (int *) malloc (max_number_of_flows_in_a_interval * sizeof(unsigned int));
+                sum = 0;
+                window_sum = 0;
+                window_throughput = 0;
+                v_act = 0;
+                v_pred = 0;
+                
 
-                window_buffer = (int **) malloc (window_size * sizeof(int *));
-                int *v = (int *)malloc(max_number_of_flows_in_a_window * sizeof(unsigned int));
-                int sum = 0;
-                int v_tmp = 0;
-                // trainning
+                // training
                 while(c<p && training){
                         sum = 0;
-                        v_tmp = 0;
                         while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
                                 // recieving packets
                                 for (i = 0; i < qconf->n_rx_port; i++) {
@@ -298,35 +215,37 @@ static int lcore_main(__rte_unused void *dummy){
                                         for (j = 0; j < nb_rx; j++) {
                                                 pkt = pkts_burst[j];
                                                 ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
-
-                                                v[ipv4_hdr->dst_addr % max_number_of_flows_in_a_window]++;
-                                                printf(" bucket %i incremented \n",ipv4_hdr->dst_addr % max_number_of_flows_in_a_window);
-                                                // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
-                                                // process_packet(m);
+                                                interval_buffer[ipv4_hdr->dst_addr % max_number_of_flows_in_a_interval]++;
                                         }
-                                        number_of_packets_in_a_window += nb_rx;
+                                        number_of_packets_in_a_interval += nb_rx;
                                 }
                                 end_time = clock();
                         }
                         
                         // a time interval passed
-                        qsort(v, max_number_of_flows_in_a_window, sizeof(unsigned int), compare);
-                        for(int t=0;t<max_number_of_flows_in_a_window;t++)
-                                sum+=v[t] *  (max_number_of_flows_in_a_window-t);
-                        v_tmp = sum / (max_number_of_flows_in_a_window*(max_number_of_flows_in_a_window-1));
-                        v_tmp /= 2;
-                        if (v_tmp>v_max)
-                                v_max = v_tmp;
-                        else if(v_tmp<v_min)
-                                v_min = v_tmp;
-                        for(int index=0;index<max_number_of_flows_in_a_window;index++)
-                                printf("index %i: %u\n",index,v[index]);
-                        printf("#####\n#####\n#####\n");
+                        printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
+                        number_of_packets_in_a_interval = 0;
+                        // find max through in current interval
+                        window_buffer[c] = find_max(interval_buffer);
+                        window_sum += window_buffer[c];
                         c++;
+                        if (c%window_size==0){
+                                // window size reached
+                                for(int t=0;t<window_size;t++)
+                                        // WMA algorithm on current window
+                                        window_throughput += window_buffer[t] * (window_buffer[t] / window_sum);
+                                if (window_throughput > v_max)
+                                        v_max = window_throughput;
+                                else if(window_throughput < v_min)
+                                        v_min = window_throughput;
+                                window_throughput = 0;
+                                window_sum = 0;
+                                c=0;
+                        }
                 }
                 
                 if (training == true){
-                        printf("#####\n#####\ntrainning phase finished: \n");
+                        printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
                         training = false;
                         printf("v_max = %i\n",v_max);
@@ -335,8 +254,8 @@ static int lcore_main(__rte_unused void *dummy){
                 
 
                 // testing
-                while((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1){
-                                // recieving packets
+                while(((((double) (end_time - start_time)) / CLOCKS_PER_SEC)<1) && !training){
+                        // recieving packets
                         for (i = 0; i < qconf->n_rx_port; i++) {
                                 port = qconf->rx_port_list[i];
                                 nb_rx = rte_eth_rx_burst(port, 0, pkts_burst, MAX_PKT_BURST);
@@ -347,29 +266,56 @@ static int lcore_main(__rte_unused void *dummy){
                                 for (j = 0; j < nb_rx; j++) {
                                         pkt = pkts_burst[j];
                                         ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
-                                        // window_buffer[c][ipv4_hdr->dst_addr % max_number_of_flows_in_a_window]++;
-                                        // rte_prefetch0(rte_pktmbuf_mtod(m, void *));  // prefetches a cache line into all layer of caches
-                                        // process_packet(m);
+                                        interval_buffer[ipv4_hdr->dst_addr % max_number_of_flows_in_a_interval]++;
                                 }
-                                number_of_packets_in_a_window += nb_rx;
+                                number_of_packets_in_a_interval += nb_rx;
                         }
                         end_time = clock();
                 }
-
-    
-                printf("Number of packets in current time window: %u\n",number_of_packets_in_a_window);
-                c++;
-                if (c%window_size==0){
-                        // window size reached
-                        c=0;
-                }
+                // a time interval passed
+                printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
                 
+                // calculate WMA predict for next interval
+                qsort(interval_buffer, max_number_of_flows_in_a_interval, sizeof(unsigned int), compare);
+                for(int t=0;t<max_number_of_flows_in_a_interval;t++){
+                                        // WMA algorithm on current window
+                                        v_pred += interval_buffer[t] * (interval_buffer[t]/number_of_packets_in_a_interval);
+                }
+                for(int t=0;t<max_number_of_flows_in_a_interval;t++){
+                        // calculate Ratio Metric
+                        r_pred = interval_buffer[t] / v_pred;
+                        r_size += r_pred>0?1:0;
+                        r_sum += r_pred;
+                }
+                // calcuate mean and sd for Ratio Metric
+                r_mean = r_sum / r_size;
+                for(int t=0;t<max_number_of_flows_in_a_interval;t++){
+                        r_pred = interval_buffer[t] / v_pred;
+                        if (r_pred>0)
+                                r_var += pow(r_pred-r_mean,2);
+                }
+                r_var /= r_size;
+                r_sd = sqrt(r_var); 
+                r_u = r_mean + 3 * r_sd;
+                r_l = r_mean - 3 * r_sd;
+                for(int t=0;t<max_number_of_flows_in_a_interval;t++){
+                        // alert DDoS detection
+                        if ((r_pred > r_u && interval_buffer[t]>v_max) || (r_pred < r_l && interval_buffer[t] < v_min))
+                                printf("A ddos has been occured");
+                        //else
+                }
+               
+                number_of_packets_in_a_interval = 0;
+                r_size = 0;
+                r_var = 0;
+                v_pred = 0;
+                r_sum=0;
+                c++;
+                free(interval_buffer);
+                if (c%window_size==0) // window size reached
+                        c=0;
                 
         }
-        printf("number of rows: %lu\n",sizeof(window_buffer) / sizeof(window_buffer[0]));
-        printf("number of columns: %lu\n",sizeof(window_buffer[0]) / sizeof(window_buffer[0][0]));
-        printf("max number of flows:%lu\n",max_number_of_flows_in_a_window + 1);
-        printf("max number of flows:%i\n",max_number_of_flows_in_a_window + 1);
 
         return 0;
 }
@@ -392,8 +338,6 @@ int main(int argc, char *argv[])
         uint16_t portid;
         unsigned lcore_id, rx_lcore_id;
         unsigned int nb_lcores = 0;
-
-        // lcore_id = rte_lcore_id();
         
         /* Initialize the Environment Abstraction Layer (EAL). */
         int ret = rte_eal_init(argc, argv);
@@ -407,12 +351,6 @@ int main(int argc, char *argv[])
         force_quit = false;
         signal(SIGINT, signal_handler);
         signal(SIGINT, signal_handler);
-
-
-        // to-do: there is no essential need to have more than one port. There is two options:
-          // 1: incoming packets from source captured by our DDD and then they will be forwarded to Suricata. Also after proceesing packets, we will generate rule file and send for Suricata. 
-          // 2: Incoming packets from source will go for Suricata and also will be mirroed for our DDD. An we just need to generate and send rule file to Surica. (Here I use this method)
-        /* Check that there is an even number of ports to send/receive on. */
         
         
         rx_lcore_id = 0;

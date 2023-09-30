@@ -27,7 +27,8 @@ CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
 CFLAGS += -DALLOW_EXPERIMENTAL_API
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
 LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
-
+# Add math library
+CFLAGS += -lm -ldl
 ifeq ($(MAKECMDGOALS),static)
 # check for broken pkg-config
 ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
