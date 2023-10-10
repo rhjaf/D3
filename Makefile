@@ -24,11 +24,15 @@ static: build/$(APP)-static
 PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
 CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
 # Add flag to allow experimental API as l2fwd uses rte_ethdev_set_ptype API
-CFLAGS += -DALLOW_EXPERIMENTAL_API
+CFLAGS += -DALLOW_EXPERIMENTAL_API 
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
 LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
 # Add math library
-CFLAGS += -lm -ldl
+CFLAGS += -lm -Wl,--copy-dt-needed-entries
+# GDB debugging symbols
+CFLAGS += -g 
+# nDPI
+CFLAGS += -I /opt/nDPI/src/include/ /opt/nDPI/src/lib/libndpi.a -lpcap
 ifeq ($(MAKECMDGOALS),static)
 # check for broken pkg-config
 ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
