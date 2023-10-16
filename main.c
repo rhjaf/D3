@@ -14,7 +14,8 @@
 #include <stdbool.h>
 #include <math.h>
 #include <time.h>
-// #include <ndpi_main.h> // nDPI module
+#include <pcap/pcap.h>
+#include <ndpi_main.h> // nDPI module
 
 #include <rte_common.h>
 #include <rte_flow.h>
@@ -38,7 +39,7 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
-// #define TICK_RESOLUTION 1000
+#define TICK_RESOLUTION 1000
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
@@ -59,9 +60,10 @@
 	} while (0)
 
 // nDPI
-/*
+
 static struct ndpi_detection_module_struct *ndpi_struct = NULL;
 
+/*
 static void setupDetection(void)
 {
     u_int32_t i;
@@ -301,8 +303,6 @@ static void classify(mbuf *pkt){
         ndpi_finalize_initialization(ndpi_struct);
 }
 */
-
-
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
@@ -378,7 +378,11 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         return 0;
 }
 
-
+static void ndpi_process_packet(const struct pcap_pkthdr *header, const u_char *packet) {
+                                        
+                                        
+                                        return ;
+}
 
 
 /*
@@ -467,8 +471,13 @@ static int lcore_main(__rte_unused void *dummy){
                                                 uint16_t payloadLength = packetLength - pkt->l2_len - pkt->l3_len - pkt->l4_len;
                                                 flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
                                                 flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
-                                                
 
+                                                char *data = rte_pktmbuf_mtod(pkt, char *);
+                                                int len = rte_pktmbuf_pkt_len(pkt);
+                                                struct pcap_pkthdr h;
+                                                h.len = h.caplen = len;
+                                                gettimeofday(&h.ts, NULL);
+                                                ndpi_process_packet(&h, (const u_char *)data);
                                         }
                                         
                                         // sending packets back
