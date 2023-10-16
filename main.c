@@ -14,7 +14,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <time.h>
-#include <ndpi_main.h> // nDPI module
+// #include <ndpi_main.h> // nDPI module
 
 #include <rte_common.h>
 #include <rte_flow.h>
@@ -36,8 +36,9 @@
 #include <rte_ethdev.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
+#include <rte_flow.h>
 
-#define TICK_RESOLUTION 1000
+// #define TICK_RESOLUTION 1000
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
@@ -57,9 +58,8 @@
 		*d = (uint8_t)(ip & 0xff);\
 	} while (0)
 
-
 // nDPI
-
+/*
 static struct ndpi_detection_module_struct *ndpi_struct = NULL;
 
 static void setupDetection(void)
@@ -72,7 +72,7 @@ static void setupDetection(void)
         printf("ERROR: global structure initialization failed\n");
         exit(-1);
     }
-    /*
+    
     // enable all protocols
     NDPI_BITMASK_SET_ALL(all);
     ndpi_set_protocol_detection_bitmask2(ndpi_struct, &all);
@@ -112,10 +112,10 @@ static void setupDetection(void)
     // clear memory for results
     memset(protocol_counter, 0, (NDPI_MAX_SUPPORTED_PROTOCOLS + 1) * sizeof(u_int64_t));
     memset(protocol_counter_bytes, 0, (NDPI_MAX_SUPPORTED_PROTOCOLS + 1) * sizeof(u_int64_t));
-    */
+    
 }
 
-
+*/
 
 static uint16_t nb_rxd = RX_DESC_DEFAULT;
 static uint16_t nb_txd = TX_DESC_DEFAULT;
@@ -175,7 +175,7 @@ int find_max(const int arr[],int arr_size){
 }
 
 // nDPI
-
+/*
 struct nDPI_flow_info {
   uint32_t flow_id;
   unsigned long long int packets_processed;
@@ -253,7 +253,7 @@ static void classify(mbuf *pkt){
         uint32_t thread_index = INITIAL_THREAD_HASH; // generated with `dd if=/dev/random bs=1024 count=1 |& hd'
 
         time_ms = ((uint64_t) header->ts.tv_sec) * TICK_RESOLUTION + header->ts.tv_usec / (1000000 / TICK_RESOLUTION);
-        /* process datalink layer */
+        // process datalink layer
         switch (pcap_datalink(workflow->pcap_handle)) {
                 case DLT_NULL:
                         if (ntohl(*((uint32_t *)&packet[eth_offset])) == 0x00000002) {
@@ -272,19 +272,19 @@ static void classify(mbuf *pkt){
                         ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;
                         type = ntohs(ethernet->h_proto);
                         switch (type) {
-                                case ETH_P_IP: /* IPv4 */
+                                case ETH_P_IP: // IPv4 
                                         if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
                                                 fprintf(stderr, "[%8llu, %d] IP packet too short - skipping\n", workflow->packets_captured, reader_thread->array_index);
                                                 return;
                                         }
                                         break;
-                                case ETH_P_IPV6: /* IPV6 */
+                                case ETH_P_IPV6: // IPV6 
                                         if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
                                                 fprintf(stderr, "[%8llu, %d] IP6 packet too short - skipping\n",workflow->packets_captured, reader_thread->array_index);
                                                 return;
                                         }
                                         break;
-                                case ETH_P_ARP: /* ARP */
+                                case ETH_P_ARP: // ARP 
                                         return;
                                 default:
                                         fprintf(stderr, "[%8llu, %d] Unknown Ethernet packet with type 0x%X - skipping\n",workflow->packets_captured, reader_thread->array_index, type);
@@ -300,7 +300,7 @@ static void classify(mbuf *pkt){
 
         ndpi_finalize_initialization(ndpi_struct);
 }
-
+*/
 
 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
@@ -490,13 +490,14 @@ static int lcore_main(__rte_unused void *dummy){
                         
                         printf("Number of packets in %d time interval: %d\n",c,number_of_packets_in_a_interval);
                         number_of_packets_in_a_interval = 0;
-                        
+                        /*
                         for(int s=0;s<max_number_of_flows;s++){
                                 char a,b,c,d;
                                 uint32_t_to_char(rte_bswap32(ipv4_hdr->src_addr), &a, &b, &c, &d);
                                 printf("%3hhu.%3hhu.%3hhu.%3hhu\t %d %d",a,b,c,d,flow_stats[s].num_packets,flow_stats[s].volume); 
                         }
-                        system("clear");
+                        */
+                        // system("clear");
                         // find max through in current interval
                         /*
                         for(int t=0;t<max_number_of_flows_in_a_interval;t++)
@@ -529,11 +530,11 @@ static int lcore_main(__rte_unused void *dummy){
                 }
 
                 if(training==true){
-                        // printf("#####\n#####\ntraining phase finished: \n");
+                        printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
                         training = false;
-                        // printf("v_max = %i\n",v_max);
-                        // printf("v_min = %i\n",v_min);
+                        printf("v_max = %i\n",v_max);
+                        printf("v_min = %i\n",v_min);
                 }
                 
                 start_time = clock();
@@ -589,7 +590,9 @@ static int lcore_main(__rte_unused void *dummy){
                         r_sum += r_pred;
                 }
                 // calcuate mean and sd for Ratio Metric
-                r_mean = r_sum / r_size;
+                
+                if(r_size<0)
+                        r_mean = r_sum / r_size;
                 for(int t=0;t<max_number_of_flows_in_a_interval;t++){
                         r_pred = interval_buffer[t] / v_pred;
                         if (r_pred>0)
@@ -643,7 +646,7 @@ int main(int argc, char *argv[])
         unsigned int nb_lcores = 0;
         
         
-        setupDetection(); // nDPI initalizationx
+        // setupDetection(); // nDPI initalizationx
 
         /* Initialize the Environment Abstraction Layer (EAL). */
         int ret = rte_eal_init(argc, argv);
