@@ -16,6 +16,7 @@
 #include <time.h>
 #include <pcap/pcap.h>
 #include <ndpi_main.h> // nDPI module
+#include <ndpi_typedefs.h>
 
 #include <rte_common.h>
 #include <rte_flow.h>
@@ -39,7 +40,7 @@
 #include <rte_mbuf.h>
 #include <rte_flow.h>
 
-#define TICK_RESOLUTION 1000
+
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
@@ -59,65 +60,88 @@
 		*d = (uint8_t)(ip & 0xff);\
 	} while (0)
 
+
+#define IDLE_SCAN_PERIOD 10000 /* msec */
+#define INITIAL_THREAD_HASH 0x03dd018b
+#define MAX_FLOW_ROOTS_PER_THREAD 2048
+#define MAX_IDLE_FLOWS_PER_THREAD 64
+#define TICK_RESOLUTION 1000
 // nDPI
 
 static struct ndpi_detection_module_struct *ndpi_struct = NULL;
 
-/*
-static void setupDetection(void)
-{
-    u_int32_t i;
-    NDPI_PROTOCOL_BITMASK all;
 
-    // init global detection structure
-    if (ndpi_struct == NULL) {
-        printf("ERROR: global structure initialization failed\n");
-        exit(-1);
-    }
-    
-    // enable all protocols
-    NDPI_BITMASK_SET_ALL(all);
-    ndpi_set_protocol_detection_bitmask2(ndpi_struct, &all);
+static unsigned long long int total_packets_captured;
+static unsigned long long int total_packets_processed;
+static unsigned long long int total_l4_data_len;
+static unsigned long long int total_flows_captured;
+static unsigned long long int total_flows_idle;
+static unsigned long long int total_flows_detected;
 
-    // allocate memory for id and flow tracking
-    size_id_struct = ndpi_detection_get_sizeof_ndpi_id_struct();
-    size_flow_struct = ndpi_detection_get_sizeof_ndpi_flow_struct();
+static uint64_t last_idle_scan_time;
+static uint64_t last_time;
+static void ** ndpi_flows_active;
+static unsigned long long int max_active_flows;
+static unsigned long long int cur_active_flows;
+static void ** ndpi_flows_idle;
+static unsigned long long int max_idle_flows;
+static unsigned long long int cur_idle_flows;
 
-    osdpi_ids = malloc(MAX_OSDPI_IDS * sizeof(struct osdpi_id));
-    if (osdpi_ids == NULL) {
-        printf("ERROR: malloc for osdpi_ids failed\n");
-        exit(-1);
-    }
-    for (i = 0; i < MAX_OSDPI_IDS; i++) {
-        memset(&osdpi_ids[i], 0, sizeof(struct osdpi_id));
-        osdpi_ids[i].ndpi_id = calloc(1, size_id_struct);
-        if (osdpi_ids[i].ndpi_id == NULL) {
-            printf("ERROR: malloc for ndpi_id_struct failed\n");
-            exit(-1);
-        }
-    }
 
-    osdpi_flows = malloc(MAX_OSDPI_FLOWS * sizeof(struct osdpi_flow));
-    if (osdpi_flows == NULL) {
-        printf("ERROR: malloc for osdpi_flows failed\n");
-        exit(-1);
-    }
-    for (i = 0; i < MAX_OSDPI_FLOWS; i++) {
-        memset(&osdpi_flows[i], 0, sizeof(struct osdpi_flow));
-        osdpi_flows[i].ndpi_flow = calloc(1, size_flow_struct);
-        if (osdpi_flows[i].ndpi_flow == NULL) {
-            printf("ERROR: malloc for ndpi_flow_struct failed\n");
-            exit(-1);
-        }
-    }
 
-    // clear memory for results
-    memset(protocol_counter, 0, (NDPI_MAX_SUPPORTED_PROTOCOLS + 1) * sizeof(u_int64_t));
-    memset(protocol_counter_bytes, 0, (NDPI_MAX_SUPPORTED_PROTOCOLS + 1) * sizeof(u_int64_t));
-    
-}
+enum nDPI_l3_type {
+  L3_IP, L3_IP6
+};
 
-*/
+struct nDPI_flow_info {
+        uint32_t flow_id;
+        unsigned long long int packets_processed;
+        uint64_t first_seen;
+        uint64_t last_seen;
+        uint64_t hashval;
+
+        enum nDPI_l3_type l3_type;
+        union {
+          struct {
+            uint32_t src;
+            uint32_t pad_00[3];
+            uint32_t dst;
+            uint32_t pad_01[3];
+          } v4;
+          struct {
+            uint64_t src[2];
+            uint64_t dst[2];
+          } v6;
+
+          struct {
+            uint32_t src[4];
+            uint32_t dst[4];
+          } u32;
+        } ip_tuple;
+
+        unsigned long long int total_l4_data_len;
+        uint16_t src_port;
+        uint16_t dst_port;
+
+        uint8_t is_midstream_flow:1;
+        uint8_t flow_fin_ack_seen:1;
+        uint8_t flow_ack_seen:1;
+        uint8_t detection_completed:1;
+        uint8_t tls_client_hello_seen:1;
+        uint8_t tls_server_hello_seen:1;
+        uint8_t flow_info_printed:1;
+        uint8_t reserved_00:1;
+        uint8_t l4_protocol;
+
+        struct ndpi_proto detected_l7_protocol;
+        struct ndpi_proto guessed_protocol;
+
+        struct ndpi_flow_struct * ndpi_flow;
+
+};      
+
+
+
 
 static uint16_t nb_rxd = RX_DESC_DEFAULT;
 static uint16_t nb_txd = TX_DESC_DEFAULT;
@@ -177,138 +201,556 @@ int find_max(const int arr[],int arr_size){
 }
 
 // nDPI
+
 /*
-struct nDPI_flow_info {
-  uint32_t flow_id;
-  unsigned long long int packets_processed;
-  uint64_t first_seen;
-  uint64_t last_seen;
-  uint64_t hashval;
+static void ndpi_idle_scan_walker(void const * const A, ndpi_VISIT which, int depth, void * const user_data)
+{
+  struct nDPI_workflow * const workflow = (struct nDPI_workflow *)user_data;
+  struct nDPI_flow_info * const flow = *(struct nDPI_flow_info **)A;
 
-  enum nDPI_l3_type l3_type;
-  union {
-    struct {
-      uint32_t src;
-      uint32_t pad_00[3];
-      uint32_t dst;
-      uint32_t pad_01[3];
-    } v4;
-    struct {
-      uint64_t src[2];
-      uint64_t dst[2];
-    } v6;
+  (void)depth;
 
-    struct {
-      uint32_t src[4];
-      uint32_t dst[4];
-    } u32;
-  } ip_tuple;
+  if (workflow == NULL || flow == NULL) {
+    return;
+  }
 
-  unsigned long long int total_l4_data_len;
-  uint16_t src_port;
-  uint16_t dst_port;
+  if (workflow->cur_idle_flows == MAX_IDLE_FLOWS_PER_THREAD) {
+    return;
+  }
 
-  uint8_t is_midstream_flow:1;
-  uint8_t flow_fin_ack_seen:1;
-  uint8_t flow_ack_seen:1;
-  uint8_t detection_completed:1;
-  uint8_t tls_client_hello_seen:1;
-  uint8_t tls_server_hello_seen:1;
-  uint8_t flow_info_printed:1;
-  uint8_t reserved_00:1;
-  uint8_t l4_protocol;
-
-  struct ndpi_proto detected_l7_protocol;
-  struct ndpi_proto guessed_protocol;
-
-  struct ndpi_flow_struct * ndpi_flow;
-};
-
-
-static void classify(mbuf *pkt){
-        struct ndpi_detection_module_struct * ndpi_struct = NULL;
-        ndpi_init_prefs init_prefs = ndpi_no_prefs;
-        ndpi_struct = ndpi_init_detection_module(init_prefs);
-        if (ndpi_struct == NULL) {
-                free_workflow(&workflow);
-                return NULL;
-        }
-
-        NDPI_PROTOCOL_BITMASK protos;
-        NDPI_BITMASK_SET_ALL(protos);
-        ndpi_set_protocol_detection_bitmask2(ndpi_struct, &protos);
-
-        struct nDPI_flow_info flow = {};
-        size_t hashed_index;
-        void * tree_result;
-        struct nDPI_flow_info * flow_to_process;
-        const struct ndpi_ethhdr * ethernet;
-        const struct ndpi_iphdr * ip;
-        struct ndpi_ipv6hdr * ip6;
-        uint64_t time_ms;
-        const uint16_t eth_offset = 0;
-        uint16_t ip_offset;
-        uint16_t ip_size;
-        const uint8_t * l4_ptr = NULL;
-        uint16_t l4_len = 0;
-        uint16_t type;
-        uint32_t thread_index = INITIAL_THREAD_HASH; // generated with `dd if=/dev/random bs=1024 count=1 |& hd'
-
-        time_ms = ((uint64_t) header->ts.tv_sec) * TICK_RESOLUTION + header->ts.tv_usec / (1000000 / TICK_RESOLUTION);
-        // process datalink layer
-        switch (pcap_datalink(workflow->pcap_handle)) {
-                case DLT_NULL:
-                        if (ntohl(*((uint32_t *)&packet[eth_offset])) == 0x00000002) {
-                                type = ETH_P_IP;
-                        } else {
-                                type = ETH_P_IPV6;
-                        }
-                        ip_offset = 4 + eth_offset;
-                        break;
-                case DLT_EN10MB:
-                        if (header->len < sizeof(struct ndpi_ethhdr)) {
-                                fprintf(stderr, "[%8llu, %d] Ethernet packet too short - skipping\n", workflow->packets_captured, reader_thread->array_index);
-                        return;
-                        }
-                        ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];
-                        ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;
-                        type = ntohs(ethernet->h_proto);
-                        switch (type) {
-                                case ETH_P_IP: // IPv4 
-                                        if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
-                                                fprintf(stderr, "[%8llu, %d] IP packet too short - skipping\n", workflow->packets_captured, reader_thread->array_index);
-                                                return;
-                                        }
-                                        break;
-                                case ETH_P_IPV6: // IPV6 
-                                        if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
-                                                fprintf(stderr, "[%8llu, %d] IP6 packet too short - skipping\n",workflow->packets_captured, reader_thread->array_index);
-                                                return;
-                                        }
-                                        break;
-                                case ETH_P_ARP: // ARP 
-                                        return;
-                                default:
-                                        fprintf(stderr, "[%8llu, %d] Unknown Ethernet packet with type 0x%X - skipping\n",workflow->packets_captured, reader_thread->array_index, type);
-                                        return;
-                        }
-                        break;
-                default:
-                        fprintf(stderr, "[%8llu, %d] Captured non IP/Ethernet packet with datalink type 0x%X - skipping\n",workflow->packets_captured, reader_thread->array_index, pcap_datalink(workflow->pcap_handle));
-                        return;
-        }
-
-
-
-        ndpi_finalize_initialization(ndpi_struct);
+  if (which == ndpi_preorder || which == ndpi_leaf) {
+    if ((flow->flow_fin_ack_seen == 1 && flow->flow_ack_seen == 1) ||
+	flow->last_seen + MAX_IDLE_TIME < workflow->last_time)
+      {
+	char src_addr_str[INET6_ADDRSTRLEN+1];
+	char dst_addr_str[INET6_ADDRSTRLEN+1];
+	ip_tuple_to_string(flow, src_addr_str, sizeof(src_addr_str), dst_addr_str, sizeof(dst_addr_str));
+	workflow->ndpi_flows_idle[workflow->cur_idle_flows++] = flow;
+	workflow->total_idle_flows++;
+      }
+  }
 }
+
+static struct nDPI_workflow * init_workflow(char const * const file_or_device)
+{
+  char pcap_error_buffer[PCAP_ERRBUF_SIZE];
+  struct nDPI_workflow * workflow = (struct nDPI_workflow *)ndpi_calloc(1, sizeof(*workflow));
+
+  ndpi_init_prefs init_prefs = ndpi_no_prefs;
+  workflow->ndpi_struct = ndpi_init_detection_module(init_prefs);
+  if (workflow->ndpi_struct == NULL) {
+    free_workflow(&workflow);
+    return NULL;
+  }
+
+  workflow->total_active_flows = 0;
+  workflow->max_active_flows = MAX_FLOW_ROOTS_PER_THREAD;
+  workflow->ndpi_flows_active = (void **)ndpi_calloc(workflow->max_active_flows, sizeof(void *));
+  if (workflow->ndpi_flows_active == NULL) {
+    free_workflow(&workflow);
+    return NULL;
+  }
+
+  workflow->total_idle_flows = 0;
+  workflow->max_idle_flows = MAX_IDLE_FLOWS_PER_THREAD;
+  workflow->ndpi_flows_idle = (void **)ndpi_calloc(workflow->max_idle_flows, sizeof(void *));
+  if (workflow->ndpi_flows_idle == NULL) {
+    free_workflow(&workflow);
+    return NULL;
+  }
+
+  NDPI_PROTOCOL_BITMASK protos;
+  NDPI_BITMASK_SET_ALL(protos);
+  ndpi_set_protocol_detection_bitmask2(workflow->ndpi_struct, &protos);
+  ndpi_finalize_initialization(workflow->ndpi_struct);
+
+  return workflow;
+}
+
+
+
+
+
+
+static void check_for_idle_flows()
+{
+  if (last_idle_scan_time + IDLE_SCAN_PERIOD < last_time) {
+    for (size_t idle_scan_index = 0; idle_scan_index < max_active_flows; ++idle_scan_index) {
+      ndpi_twalk(ndpi_flows_active[idle_scan_index], ndpi_idle_scan_walker, workflow);
+
+      while (cur_idle_flows > 0) {
+	struct nDPI_flow_info * const f =
+	  (struct nDPI_flow_info *)ndpi_flows_idle[--cur_idle_flows];
+	if (f->flow_fin_ack_seen == 1) {
+	  printf("Free fin flow with id %u\n", f->flow_id);
+	} else {
+	  printf("Free idle flow with id %u\n", f->flow_id);
+	}
+	ndpi_tdelete(f, &ndpi_flows_active[idle_scan_index],
+		     ndpi_workflow_node_cmp);
+	ndpi_flow_info_freer(f);
+	cur_active_flows--;
+      }
+    }
+
+    last_idle_scan_time = last_time;
+  }
+}
+
+static void ndpi_process_packet(const struct pcap_pkthdr *header, const u_char *packet) {
+  struct nDPI_flow_info flow = {};
+
+  size_t hashed_index;
+  void * tree_result;
+  struct nDPI_flow_info * flow_to_process;
+
+  const struct ndpi_ethhdr * ethernet;
+  const struct ndpi_iphdr * ip;
+  struct ndpi_ipv6hdr * ip6;
+
+  uint64_t time_ms;
+  const uint16_t eth_offset = 0;
+  uint16_t ip_offset;
+  uint16_t ip_size;
+
+  const uint8_t * l4_ptr = NULL;
+  uint16_t l4_len = 0;
+
+  uint16_t type;
+  uint32_t thread_index = INITIAL_THREAD_HASH; // generated with `dd if=/dev/random bs=1024 count=1 |& hd'
+
+  total_packets_captured++;
+  time_ms = ((uint64_t) header->ts.tv_sec) * TICK_RESOLUTION + header->ts.tv_usec / (1000000 / TICK_RESOLUTION);
+  last_time = time_ms;
+
+  check_for_idle_flows();
+
+  // process datalink layer 
+  switch (pcap_datalink(workflow->pcap_handle)) {
+  case DLT_NULL:
+    if (ntohl(*((uint32_t *)&packet[eth_offset])) == 0x00000002) {
+      type = ETH_P_IP;
+    } else {
+      type = ETH_P_IPV6;
+    }
+    ip_offset = 4 + eth_offset;
+    break;
+  case DLT_EN10MB:
+    if (header->len < sizeof(struct ndpi_ethhdr)) {
+      fprintf(stderr, "[%8llu, %d] Ethernet packet too short - skipping\n",
+	      packets_captured, reader_thread->array_index);
+      return;
+    }
+    ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];
+    ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;
+    type = ntohs(ethernet->h_proto);
+    switch (type) {
+    case ETH_P_IP:  // IPv4 
+      if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
+	fprintf(stderr, "[%8llu, %d] IP packet too short - skipping\n",
+		packets_captured, reader_thread->array_index);
+	return;
+      }
+      break;
+    case ETH_P_IPV6: // IPV6 
+      if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
+	fprintf(stderr, "[%8llu, %d] IP6 packet too short - skipping\n",
+		packets_captured, reader_thread->array_index);
+	return;
+      }
+      break;
+    case ETH_P_ARP: // ARP 
+      return;
+    default:
+      fprintf(stderr, "[%8llu, %d] Unknown Ethernet packet with type 0x%X - skipping\n",
+	      packets_captured, reader_thread->array_index, type);
+      return;
+    }
+    break;
+  default:
+    fprintf(stderr, "[%8llu, %d] Captured non IP/Ethernet packet with datalink type 0x%X - skipping\n",
+	    packets_captured, reader_thread->array_index, pcap_datalink(pcap_handle));
+    return;
+  }
+
+  if (type == ETH_P_IP) {
+    ip = (struct ndpi_iphdr *)&packet[ip_offset];
+    ip6 = NULL;
+  } else if (type == ETH_P_IPV6) {
+    ip = NULL;
+    ip6 = (struct ndpi_ipv6hdr *)&packet[ip_offset];
+  } else {
+    fprintf(stderr, "[%8llu, %d] Captured non IPv4/IPv6 packet with type 0x%X - skipping\n",
+	    packets_captured, reader_thread->array_index, type);
+    return;
+  }
+  ip_size = header->len - ip_offset;
+
+  if (type == ETH_P_IP && header->len >= ip_offset) {
+    if (header->caplen < header->len) {
+      fprintf(stderr, "[%8llu, %d] Captured packet size is smaller than packet size: %u < %u\n",
+	      packets_captured, reader_thread->array_index, header->caplen, header->len);
+    }
+  }
+
+  // process layer3 e.g. IPv4 / IPv6 
+  if (ip != NULL && ip->version == 4) {
+    if (ip_size < sizeof(*ip)) {
+      fprintf(stderr, "[%8llu, %d] Packet smaller than IP4 header length: %u < %zu\n",
+	      packets_captured, reader_thread->array_index, ip_size, sizeof(*ip));
+      return;
+    }
+
+    flow.l3_type = L3_IP;
+    if (ndpi_detection_get_l4((uint8_t*)ip, ip_size, &l4_ptr, &l4_len,
+			      &flow.l4_protocol, NDPI_DETECTION_ONLY_IPV4) != 0)
+      {
+	fprintf(stderr, "[%8llu, %d] nDPI IPv4/L4 payload detection failed, L4 length: %zu\n",
+		packets_captured, reader_thread->array_index, ip_size - sizeof(*ip));
+	return;
+      }
+
+    flow.ip_tuple.v4.src = ip->saddr;
+    flow.ip_tuple.v4.dst = ip->daddr;
+    uint32_t min_addr = (flow.ip_tuple.v4.src > flow.ip_tuple.v4.dst ?
+			 flow.ip_tuple.v4.dst : flow.ip_tuple.v4.src);
+    thread_index = min_addr + ip->protocol;
+  } else if (ip6 != NULL) {
+    if (ip_size < sizeof(ip6->ip6_hdr)) {
+      fprintf(stderr, "[%8llu, %d] Packet smaller than IP6 header length: %u < %zu\n",
+	      packets_captured, reader_thread->array_index, ip_size, sizeof(ip6->ip6_hdr));
+      return;
+    }
+
+    flow.l3_type = L3_IP6;
+    if (ndpi_detection_get_l4((uint8_t*)ip6, ip_size, &l4_ptr, &l4_len,
+			      &flow.l4_protocol, NDPI_DETECTION_ONLY_IPV6) != 0)
+      {
+	fprintf(stderr, "[%8llu, %d] nDPI IPv6/L4 payload detection failed, L4 length: %zu\n",
+		packets_captured, reader_thread->array_index, ip_size - sizeof(*ip6));
+	return;
+      }
+
+    flow.ip_tuple.v6.src[0] = ip6->ip6_src.u6_addr.u6_addr64[0];
+    flow.ip_tuple.v6.src[1] = ip6->ip6_src.u6_addr.u6_addr64[1];
+    flow.ip_tuple.v6.dst[0] = ip6->ip6_dst.u6_addr.u6_addr64[0];
+    flow.ip_tuple.v6.dst[1] = ip6->ip6_dst.u6_addr.u6_addr64[1];
+    uint64_t min_addr[2];
+    if (flow.ip_tuple.v6.src[0] > flow.ip_tuple.v6.dst[0] &&
+	flow.ip_tuple.v6.src[1] > flow.ip_tuple.v6.dst[1])
+      {
+	min_addr[0] = flow.ip_tuple.v6.dst[0];
+	min_addr[1] = flow.ip_tuple.v6.dst[0];
+      } else {
+      min_addr[0] = flow.ip_tuple.v6.src[0];
+      min_addr[1] = flow.ip_tuple.v6.src[0];
+    }
+    thread_index = min_addr[0] + min_addr[1] + ip6->ip6_hdr.ip6_un1_nxt;
+  } else {
+    fprintf(stderr, "[%8llu, %d] Non IP/IPv6 protocol detected: 0x%X\n",
+	    packets_captured, reader_thread->array_index, type);
+    return;
+  }
+
+  // process layer4 e.g. TCP / UDP 
+  if (flow.l4_protocol == IPPROTO_TCP) {
+    const struct ndpi_tcphdr * tcp;
+
+    if (header->len < (l4_ptr - packet) + sizeof(struct ndpi_tcphdr)) {
+      fprintf(stderr, "[%8llu, %d] Malformed TCP packet, packet size smaller than expected: %u < %zu\n",
+	      packets_captured, reader_thread->array_index,
+	      header->len, (l4_ptr - packet) + sizeof(struct ndpi_tcphdr));
+      return;
+    }
+    tcp = (struct ndpi_tcphdr *)l4_ptr;
+    flow.is_midstream_flow = (tcp->syn == 0 ? 1 : 0);
+    flow.flow_fin_ack_seen = (tcp->fin == 1 && tcp->ack == 1 ? 1 : 0);
+    flow.flow_ack_seen = tcp->ack;
+    flow.src_port = ntohs(tcp->source);
+    flow.dst_port = ntohs(tcp->dest);
+  } else if (flow.l4_protocol == IPPROTO_UDP) {
+    const struct ndpi_udphdr * udp;
+
+    if (header->len < (l4_ptr - packet) + sizeof(struct ndpi_udphdr)) {
+      fprintf(stderr, "[%8llu, %d] Malformed UDP packet, packet size smaller than expected: %u < %zu\n",
+	      packets_captured, reader_thread->array_index,
+	      header->len, (l4_ptr - packet) + sizeof(struct ndpi_udphdr));
+      return;
+    }
+    udp = (struct ndpi_udphdr *)l4_ptr;
+    flow.src_port = ntohs(udp->source);
+    flow.dst_port = ntohs(udp->dest);
+  }
+
+  // distribute flows to threads while keeping stability (same flow goes always to same thread) 
+  thread_index += (flow.src_port < flow.dst_port ? flow.dst_port : flow.src_port);
+  thread_index %= reader_thread_count;
+  if (thread_index != reader_thread->array_index) {
+    return;
+  }
+  packets_processed++;
+  total_l4_data_len += l4_len;
+
+#ifdef VERBOSE
+  print_packet_info(reader_thread, header, l4_len, &flow);
+#endif
+
+  // calculate flow hash for btree find, search(insert) 
+  if (flow.l3_type == L3_IP) {
+    if (ndpi_flowv4_flow_hash(flow.l4_protocol, flow.ip_tuple.v4.src, flow.ip_tuple.v4.dst,
+			      flow.src_port, flow.dst_port, 0, 0,
+			      (uint8_t *)&flow.hashval, sizeof(flow.hashval)) != 0)
+      {
+	flow.hashval = flow.ip_tuple.v4.src + flow.ip_tuple.v4.dst; // fallback
+      }
+  } else if (flow.l3_type == L3_IP6) {
+    if (ndpi_flowv6_flow_hash(flow.l4_protocol, &ip6->ip6_src, &ip6->ip6_dst,
+			      flow.src_port, flow.dst_port, 0, 0,
+			      (uint8_t *)&flow.hashval, sizeof(flow.hashval)) != 0)
+      {
+	flow.hashval = flow.ip_tuple.v6.src[0] + flow.ip_tuple.v6.src[1];
+	flow.hashval += flow.ip_tuple.v6.dst[0] + flow.ip_tuple.v6.dst[1];
+      }
+  }
+  flow.hashval += flow.l4_protocol + flow.src_port + flow.dst_port;
+
+  hashed_index = flow.hashval % max_active_flows;
+  tree_result = ndpi_tfind(&flow, &ndpi_flows_active[hashed_index], ndpi_workflow_node_cmp);
+  if (tree_result == NULL) {
+    // flow not found in btree: switch src <-> dst and try to find it again 
+    uint32_t orig_src_ip[4] = { flow.ip_tuple.u32.src[0], flow.ip_tuple.u32.src[1],
+                                flow.ip_tuple.u32.src[2], flow.ip_tuple.u32.src[3] };
+    uint32_t orig_dst_ip[4] = { flow.ip_tuple.u32.dst[0], flow.ip_tuple.u32.dst[1],
+                                flow.ip_tuple.u32.dst[2], flow.ip_tuple.u32.dst[3] };
+    uint16_t orig_src_port = flow.src_port;
+    uint16_t orig_dst_port = flow.dst_port;
+
+    flow.ip_tuple.u32.src[0] = orig_dst_ip[0];
+    flow.ip_tuple.u32.src[1] = orig_dst_ip[1];
+    flow.ip_tuple.u32.src[2] = orig_dst_ip[2];
+    flow.ip_tuple.u32.src[3] = orig_dst_ip[3];
+
+    flow.ip_tuple.u32.dst[0] = orig_src_ip[0];
+    flow.ip_tuple.u32.dst[1] = orig_src_ip[1];
+    flow.ip_tuple.u32.dst[2] = orig_src_ip[2];
+    flow.ip_tuple.u32.dst[3] = orig_src_ip[3];
+
+    flow.src_port = orig_dst_port;
+    flow.dst_port = orig_src_port;
+
+    tree_result = ndpi_tfind(&flow, &ndpi_flows_active[hashed_index], ndpi_workflow_node_cmp);
+
+    flow.ip_tuple.u32.src[0] = orig_src_ip[0];
+    flow.ip_tuple.u32.src[1] = orig_src_ip[1];
+    flow.ip_tuple.u32.src[2] = orig_src_ip[2];
+    flow.ip_tuple.u32.src[3] = orig_src_ip[3];
+
+    flow.ip_tuple.u32.dst[0] = orig_dst_ip[0];
+    flow.ip_tuple.u32.dst[1] = orig_dst_ip[1];
+    flow.ip_tuple.u32.dst[2] = orig_dst_ip[2];
+    flow.ip_tuple.u32.dst[3] = orig_dst_ip[3];
+
+    flow.src_port = orig_src_port;
+    flow.dst_port = orig_dst_port;
+  }
+
+  if (tree_result == NULL) {
+    // flow still not found, must be new 
+    if (cur_active_flows == max_active_flows) {
+      fprintf(stderr, "[%8llu, %d] max flows to track reached: %llu, idle: %llu\n",
+	      packets_captured, reader_thread->array_index,
+	      max_active_flows, cur_idle_flows);
+      return;
+    }
+
+    flow_to_process = (struct nDPI_flow_info *)ndpi_malloc(sizeof(*flow_to_process));
+    if (flow_to_process == NULL) {
+      fprintf(stderr, "[%8llu, %d] Not enough memory for flow info\n",
+	      packets_captured, reader_thread->array_index);
+      return;
+    }
+
+    memcpy(flow_to_process, &flow, sizeof(*flow_to_process));
+    flow_to_process->flow_id = __sync_fetch_and_add(&flow_id, 1);
+
+    flow_to_process->ndpi_flow = (struct ndpi_flow_struct *)ndpi_flow_malloc(SIZEOF_FLOW_STRUCT);
+    if (flow_to_process->ndpi_flow == NULL) {
+      fprintf(stderr, "[%8llu, %d, %4u] Not enough memory for flow struct\n",
+	      packets_captured, reader_thread->array_index, flow_to_process->flow_id);
+      return;
+    }
+    memset(flow_to_process->ndpi_flow, 0, SIZEOF_FLOW_STRUCT);
+
+    printf("[%8llu, %d, %4u] new %sflow\n", packets_captured, thread_index,
+	   flow_to_process->flow_id,
+	   (flow_to_process->is_midstream_flow != 0 ? "midstream-" : ""));
+    if (ndpi_tsearch(flow_to_process, &ndpi_flows_active[hashed_index], ndpi_workflow_node_cmp) == NULL) {
+      // Possible Leak, but should not happen as we'd abort earlier. 
+      return;
+    }
+
+    cur_active_flows++;
+    total_active_flows++;
+  } else {
+    flow_to_process = *(struct nDPI_flow_info **)tree_result;
+  }
+
+  flow_to_process->packets_processed++;
+  flow_to_process->total_l4_data_len += l4_len;
+  // update timestamps, important for timeout handling 
+  if (flow_to_process->first_seen == 0) {
+    flow_to_process->first_seen = time_ms;
+  }
+  flow_to_process->last_seen = time_ms;
+  // current packet is an TCP-ACK? 
+  flow_to_process->flow_ack_seen = flow.flow_ack_seen;
+
+  // TCP-FIN: indicates that at least one side wants to end the connection 
+  if (flow.flow_fin_ack_seen != 0 && flow_to_process->flow_fin_ack_seen == 0) {
+    flow_to_process->flow_fin_ack_seen = 1;
+    printf("[%8llu, %d, %4u] end of flow\n",  packets_captured, thread_index,
+	   flow_to_process->flow_id);
+    return;
+  }
+
+  
+   //This example tries to use maximum supported packets for detection:
+   //for uint8: 0xFF
+   
+  if (flow_to_process->ndpi_flow->num_processed_pkts == 0xFF) {
+    return;
+  } else if (flow_to_process->ndpi_flow->num_processed_pkts == 0xFE) {
+    // last chance to guess something, better then nothing
+    uint8_t protocol_was_guessed = 0;
+    flow_to_process->guessed_protocol =
+      ndpi_detection_giveup(ndpi_struct,
+			    flow_to_process->ndpi_flow,
+			    1, &protocol_was_guessed);
+    if (protocol_was_guessed != 0) {
+      printf("[%8llu, %d, %4d][GUESSED] protocol: %s | app protocol: %s | category: %s\n",
+	     packets_captured,
+	     reader_thread->array_index,
+	     flow_to_process->flow_id,
+	     ndpi_get_proto_name(ndpi_struct, flow_to_process->guessed_protocol.master_protocol),
+	     ndpi_get_proto_name(ndpi_struct, flow_to_process->guessed_protocol.app_protocol),
+	     ndpi_category_get_name(ndpi_struct, flow_to_process->guessed_protocol.category));
+    } else {
+      printf("[%8llu, %d, %4d][FLOW NOT CLASSIFIED]\n",
+	     packets_captured, reader_thread->array_index, flow_to_process->flow_id);
+    }
+  }
+
+  flow_to_process->detected_l7_protocol =
+    ndpi_detection_process_packet(ndpi_struct, flow_to_process->ndpi_flow,
+				  ip != NULL ? (uint8_t *)ip : (uint8_t *)ip6,
+				  ip_size, time_ms, NULL);
+
+  if (ndpi_is_protocol_detected(ndpi_struct,
+				flow_to_process->detected_l7_protocol) != 0 &&
+      flow_to_process->detection_completed == 0)
+    {
+      if (flow_to_process->detected_l7_protocol.master_protocol != NDPI_PROTOCOL_UNKNOWN ||
+          flow_to_process->detected_l7_protocol.app_protocol != NDPI_PROTOCOL_UNKNOWN)
+      {
+        flow_to_process->detection_completed = 1;
+        detected_flow_protocols++;
+
+        printf("[%8llu, %d, %4d][DETECTED] protocol: %s | app protocol: %s | category: %s\n",
+	       packets_captured,
+	       reader_thread->array_index,
+	       flow_to_process->flow_id,
+	       ndpi_get_proto_name(ndpi_struct, flow_to_process->detected_l7_protocol.master_protocol),
+	       ndpi_get_proto_name(ndpi_struct, flow_to_process->detected_l7_protocol.app_protocol),
+	       ndpi_category_get_name(ndpi_struct, flow_to_process->detected_l7_protocol.category));
+      }
+    }
+
+  if (flow_to_process->ndpi_flow->num_extra_packets_checked <=
+      flow_to_process->ndpi_flow->max_extra_packets_to_check)
+    {
+      
+//        Your business logic starts here.
+
+//        This example does print some information about
+//        TLS client and server hellos if available.
+
+//        You could also use nDPI's built-in json serialization
+//        and send it to a high-level application for further processing.
+
+//        EoE - End of Example
+       
+
+      if (flow_to_process->flow_info_printed == 0)
+      {
+        char const * const flow_info = ndpi_get_flow_info(flow_to_process->ndpi_flow, &flow_to_process->detected_l7_protocol);
+        if (flow_info != NULL)
+        {
+          printf("[%8llu, %d, %4d] info: %s\n",
+            packets_captured,
+            reader_thread->array_index,
+            flow_to_process->flow_id,
+            flow_info);
+          flow_to_process->flow_info_printed = 1;
+        }
+      }
+
+      if (flow_to_process->detected_l7_protocol.master_protocol == NDPI_PROTOCOL_TLS ||
+	  flow_to_process->detected_l7_protocol.app_protocol == NDPI_PROTOCOL_TLS)
+        {
+	  if (flow_to_process->tls_client_hello_seen == 0 &&
+	      flow_to_process->ndpi_flow->protos.tls_quic.hello_processed != 0)
+            {
+	      uint8_t unknown_tls_version = 0;
+	      char buf_ver[16];
+	      printf("[%8llu, %d, %4d][TLS-CLIENT-HELLO] version: %s | sni: %s | (advertised) ALPNs: %s\n",
+		     packets_captured,
+		     reader_thread->array_index,
+		     flow_to_process->flow_id,
+		     ndpi_ssl_version2str(buf_ver, sizeof(buf_ver),
+					  flow_to_process->ndpi_flow->protos.tls_quic.ssl_version,
+					  &unknown_tls_version),
+		     flow_to_process->ndpi_flow->host_server_name,
+		     (flow_to_process->ndpi_flow->protos.tls_quic.advertised_alpns != NULL ?
+		      flow_to_process->ndpi_flow->protos.tls_quic.advertised_alpns : "-"));
+	      flow_to_process->tls_client_hello_seen = 1;
+            }
+	  if (flow_to_process->tls_server_hello_seen == 0 &&
+	      flow_to_process->ndpi_flow->tls_quic.certificate_processed != 0)
+            {
+	      uint8_t unknown_tls_version = 0;
+	      char buf_ver[16];
+	      printf("[%8llu, %d, %4d][TLS-SERVER-HELLO] version: %s | common-name(s): %.*s | "
+		     "issuer: %s | subject: %s\n",
+		     packets_captured,
+		     reader_thread->array_index,
+		     flow_to_process->flow_id,
+		     ndpi_ssl_version2str(buf_ver, sizeof(buf_ver),
+					  flow_to_process->ndpi_flow->protos.tls_quic.ssl_version,
+					  &unknown_tls_version),
+		     (flow_to_process->ndpi_flow->protos.tls_quic.server_names_len == 0 ?
+		      1 : flow_to_process->ndpi_flow->protos.tls_quic.server_names_len),
+		     (flow_to_process->ndpi_flow->protos.tls_quic.server_names == NULL ?
+		      "-" : flow_to_process->ndpi_flow->protos.tls_quic.server_names),
+		     (flow_to_process->ndpi_flow->protos.tls_quic.issuerDN != NULL ?
+		      flow_to_process->ndpi_flow->protos.tls_quic.issuerDN : "-"),
+		     (flow_to_process->ndpi_flow->protos.tls_quic.subjectDN != NULL ?
+		      flow_to_process->ndpi_flow->protos.tls_quic.subjectDN : "-"));
+	      flow_to_process->tls_server_hello_seen = 1;
+            }
+        }
+    }
+}
+
 */
+
+
+
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
         const uint16_t rx_rings = 2;
 
-        const uint16_t tx_rings = 2;
+        const uint16_t tx_rings = 4;
         
         int retval;
         uint16_t q;
@@ -378,11 +820,7 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         return 0;
 }
 
-static void ndpi_process_packet(const struct pcap_pkthdr *header, const u_char *packet) {
-                                        
-                                        
-                                        return ;
-}
+
 
 
 /*
@@ -477,7 +915,7 @@ static int lcore_main(__rte_unused void *dummy){
                                                 struct pcap_pkthdr h;
                                                 h.len = h.caplen = len;
                                                 gettimeofday(&h.ts, NULL);
-                                                ndpi_process_packet(&h, (const u_char *)data);
+                                                // ndpi_process_packet(&h, (const u_char *)data);
                                         }
                                         
                                         // sending packets back
