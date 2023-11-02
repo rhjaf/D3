@@ -22,9 +22,9 @@ static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
 PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
-CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
+CFLAGS += -pthread  -O2 $(shell $(PKGCONF) --cflags libdpdk) 
 # Add flag to allow experimental API as l2fwd uses rte_ethdev_set_ptype API
-CFLAGS += -DALLOW_EXPERIMENTAL_API 
+CFLAGS += -Wno-attributes  -DALLOW_EXPERIMENTAL_API 
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
 LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
 # Add math library
@@ -32,7 +32,17 @@ CFLAGS += -lm -Wl,--copy-dt-needed-entries
 # GDB debugging symbols
 CFLAGS += -g 
 # nDPI
-CFLAGS += -I /opt/nDPI/src/include/ /opt/nDPI/src/lib/libndpi.a -lpcap
+LIBNDPI=/opt/nDPI/src/lib/libndpi.a
+LIBS=$(LIBNDPI) @PCAP_LIB@ @ADDITIONAL_LIBS@ @LIBS@ @GPROF_LIBS@
+HEADERS=reader_utils.h /opt/nDPI/src/include/ndpi_api.h /opt/nDPI/src/include/ndpi_typedefs.h /opt/nDPI/src/include/ndpi_protocol_ids.h 
+CFLAGS += -fPIC -DPIC
+CFLAGS += -I/opt/nDPI/src/include  -lpcap 
+
+CFLAGS +=  -W -Wall -Wno-attributes -Wno-strict-prototypes -Wno-missing-prototypes -Wno-missing-declarations -Wno-unused-parameter -I /opt/nDPI/src/include  -DUSE_DPDK -Wno-unused-function -D_DEFAULT_SOURCE=1 -D_GNU_SOURCE=1
+LDLIBS = $(LIBNDPI) -lpthread 
+# SRCS-y := reader_util.c
+
+
 ifeq ($(MAKECMDGOALS),static)
 # check for broken pkg-config
 ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
@@ -42,13 +52,14 @@ endif
 endif
 
 build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
-	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
+	$(CC) $(CFLAGS) $(SRCS-y) /opt/nDPI/src/lib/libndpi.a  -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
-build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build
-	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
+build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) $(HEADERS) | build
+	$(CC) $(CFLAGS) $(SRCS-y)  /opt/nDPI/src/lib/libndpi.a -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
 	@mkdir -p $@
+
 
 .PHONY: clean
 clean:
