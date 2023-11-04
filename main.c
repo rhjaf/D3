@@ -601,6 +601,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     ip_offset = 4 + eth_offset;
     break;
   case DLT_EN10MB:
+  */
     if (header->len < sizeof(struct ndpi_ethhdr)) {
       fprintf(stderr, "[%8llu] Ethernet packet too short - skipping\n",
 	      workflow->packets_captured);
@@ -610,34 +611,32 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     ip_offset = sizeof(struct ndpi_ethhdr) + eth_offset;
     type = ntohs(ethernet->h_proto);
     switch (type) {
-    case ETH_P_IP: // IPv4
-      if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
-	fprintf(stderr, "[%8llu] IP packet too short - skipping\n",
-		workflow->packets_captured);
-	return;
-      }
-      break;
-    case ETH_P_IPV6: // IPV6
-      if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
-	fprintf(stderr, "[%8llu] IP6 packet too short - skipping\n",
-		workflow->packets_captured);
-	return;
-      }
-      break;
-    case ETH_P_ARP: // ARP
-      return;
-    default:
-      fprintf(stderr, "[%8llu] Unknown Ethernet packet with type 0x%X - skipping\n",
-	      workflow->packets_captured, type);
-      return;
+      case ETH_P_IP: // IPv4
+        if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
+	        fprintf(stderr, "[%8llu] IP packet too short - skipping\n", workflow->packets_captured);
+	        return;
+        }
+        break;
+      case ETH_P_IPV6: // IPV6
+        if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
+	        fprintf(stderr, "[%8llu] IP6 packet too short - skipping\n", workflow->packets_captured);
+	        return;
+        }
+        break;
+      case ETH_P_ARP: // ARP
+        return;
+      default:
+        fprintf(stderr, "[%8llu] Unknown Ethernet packet with type 0x%X - skipping\n", workflow->packets_captured, type);
+        return;
     }
+    /*
     break;
   default:
     fprintf(stderr, "[%8llu] Captured non IP/Ethernet packet with datalink type 0x%X - skipping\n",
 	    workflow->packets_captured, pcap_datalink(workflow->pcap_handle));
     return;
   }
-  /*
+  */
 
   if (type == ETH_P_IP) {
     ip = (struct ndpi_iphdr *)&packet[ip_offset];
@@ -658,7 +657,6 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 	      workflow->packets_captured, header->caplen, header->len);
     }
   }
-  */
   /* process layer3 e.g. IPv4 / IPv6 */
   if (ip != NULL && ip->version == 4) {
     if (ip_size < sizeof(*ip)) {
@@ -1083,6 +1081,7 @@ static int lcore_main(__rte_unused void *dummy){
                                                 h.len = h.caplen = len;
                                                 gettimeofday(&h.ts, NULL);
                                                 ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data);
+                                                // printf("current active flows for %u : %llu \n",lcore_id,&ndpi_threads[i].workflow->cur_active_flows);
                                         }
                                         
                                         // sending packets back
@@ -1143,6 +1142,9 @@ static int lcore_main(__rte_unused void *dummy){
                         
                 }
 
+                for(unsigned int i=0;i<RTE_MAX_LCORE;i++)
+                  
+
                 if(training==true){
                         printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
@@ -1183,7 +1185,7 @@ static int lcore_main(__rte_unused void *dummy){
                         end_time = clock();
                 }
                 // a time interval passed
-                printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
+                // printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
                 
                 
                 
