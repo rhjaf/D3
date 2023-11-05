@@ -1081,7 +1081,7 @@ static int lcore_main(__rte_unused void *dummy){
                                                 h.len = h.caplen = len;
                                                 gettimeofday(&h.ts, NULL);
                                                 ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data);
-                                                // printf("current active flows for %u : %llu \n",lcore_id,&ndpi_threads[i].workflow->cur_active_flows);
+                                                
                                         }
                                         
                                         // sending packets back
@@ -1142,7 +1142,7 @@ static int lcore_main(__rte_unused void *dummy){
                         
                 }
 
-                for(unsigned int i=0;i<RTE_MAX_LCORE;i++)
+                
                   
 
                 if(training==true){
@@ -1152,7 +1152,7 @@ static int lcore_main(__rte_unused void *dummy){
                         printf("v_max = %i\n",v_max);
                         printf("v_min = %i\n",v_min);
                 }
-                
+                printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->total_active_flows);
                 start_time = clock();
                 end_time = clock();
                 // testing
@@ -1169,6 +1169,19 @@ static int lcore_main(__rte_unused void *dummy){
                                         pkt = pkts_burst[j];
                                         ipv4_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
                                         interval_buffer[ipv4_hdr->dst_addr % max_number_of_flows_in_a_interval]++;
+                                        
+                                                uint16_t packetLength = rte_pktmbuf_pkt_len(pkt);
+                                                uint16_t payloadLength = packetLength - pkt->l2_len - pkt->l3_len - pkt->l4_len;
+                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
+                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
+
+                                                char *data = rte_pktmbuf_mtod(pkt, char *);
+                                                int len = rte_pktmbuf_pkt_len(pkt);
+                                                struct pcap_pkthdr h;
+                                                h.len = h.caplen = len;
+                                                gettimeofday(&h.ts, NULL);
+                                                ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data);
+                                                // printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[i].workflow->total_active_flows);
                                 }
 
                                 // sending packets back
@@ -1185,7 +1198,7 @@ static int lcore_main(__rte_unused void *dummy){
                         end_time = clock();
                 }
                 // a time interval passed
-                // printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
+                printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
                 
                 
                 
@@ -1334,6 +1347,13 @@ int main(int argc, char *argv[]){
 			printf("rte_eth_dev_stop: err=%d, port=%d\n", ret, portid);
 		rte_eth_dev_close(portid);
 		printf(" Done\n");
+  }
+
+  for(unsigned int li=0;li<RTE_MAX_LCORE;li++){
+    qconf = &lcore_queue_conf[li];
+    if (qconf->n_rx_port != 0) {
+      printf("current active flows for %u : %llu \n",li,ndpi_threads[li].workflow->total_active_flows);
+    }
   }
 
   // Clean-up EAL
