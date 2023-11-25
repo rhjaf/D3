@@ -541,8 +541,7 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
 	} else {
 	  printf("Free idle flow with id %u\n", f->flow_id);
 	}
-	ndpi_tdelete(f, &workflow->ndpi_flows_active[idle_scan_index],
-		     ndpi_workflow_node_cmp);
+	ndpi_tdelete(f, &workflow->ndpi_flows_active[idle_scan_index], ndpi_workflow_node_cmp);
 	ndpi_flow_info_freer(f);
 	workflow->cur_active_flows--;
       }
@@ -1152,7 +1151,7 @@ static int lcore_main(__rte_unused void *dummy){
                         printf("v_max = %i\n",v_max);
                         printf("v_min = %i\n",v_min);
                 }
-                printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->total_active_flows);
+                printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->cur_active_flows);
                 start_time = clock();
                 end_time = clock();
                 // testing
@@ -1352,7 +1351,7 @@ int main(int argc, char *argv[]){
   for(unsigned int li=0;li<RTE_MAX_LCORE;li++){
     qconf = &lcore_queue_conf[li];
     if (qconf->n_rx_port != 0) {
-      printf("current active flows for %u : %llu \n",li,ndpi_threads[li].workflow->total_active_flows);
+      printf("current active flows for %u : %llu \n",li,ndpi_threads[li].workflow->cur_active_flows);
     }
   }
 
