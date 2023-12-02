@@ -20,6 +20,8 @@
 #include <ndpi_main.h> // nDPI module
 #include <ndpi_typedefs.h>
 #include <ndpi_api.h>
+#include<stdio.h>
+#include<stdlib.h>
 // #include <ndpi_config.h>
 // #include <ndpi_includes.h>
 // #include <ndpi_includes.h>
@@ -66,6 +68,7 @@
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
 #define max_number_of_flows 2000
+#define max_src 3000
 
 #define uint32_t_to_char(ip, a, b, c, d) do {\
 		*a = (uint8_t)(ip >> 24 & 0xff);\
@@ -103,7 +106,7 @@ struct l2fwd_port_statistics {
 } __rte_cache_aligned;
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
-
+/*
 struct ipv4_flow{
         rte_be32_t id; // src IP
         int num_packets; // number of packets from this src IP
@@ -111,6 +114,16 @@ struct ipv4_flow{
         uint16_t volume; 
         int cps; // connection per seconds
 };
+*/
+struct src_stat{
+  char * ip_string;
+  uint16_t packet_count;
+  uint16_t packet_volume;
+  uint16_t total_session;
+  uint16_t idle_session;
+};
+
+struct src_stat src_stats[max_src];
 
 
 // Comparison function for qsort
@@ -208,11 +221,13 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 // ndpi definitions
 
-#define MAX_FLOW_ROOTS 2048
+#define MAX_FLOW_ROOTS 2000000
 #define MAX_IDLE_FLOWS 64
 #define TICK_RESOLUTION 1000
-#define IDLE_SCAN_PERIOD 10000 // msec
-#define MAX_IDLE_TIME 300000 // msec
+#define IDLE_SCAN_PERIOD 5000 // msec
+#define MAX_IDLE_TIME 30000 // msec
+// #define MAX_IDLE_TIME 5000 // msec
+
 
 #ifndef ETH_P_IP
 #define ETH_P_IP 0x0800
@@ -495,7 +510,7 @@ static int ip_tuple_to_string(struct nDPI_flow_info const * const flow, char * c
       inet_ntop(AF_INET6, (struct sockaddr_in6 *)&flow->ip_tuple.v6.dst[0],
 		dst_addr_str, dst_addr_len) != NULL;
   }
-
+  
   return 0;
 }
 
@@ -521,8 +536,16 @@ static void ndpi_idle_scan_walker(void const * const A, ndpi_VISIT which, int de
 	char src_addr_str[INET6_ADDRSTRLEN+1];
 	char dst_addr_str[INET6_ADDRSTRLEN+1];
 	ip_tuple_to_string(flow, src_addr_str, sizeof(src_addr_str), dst_addr_str, sizeof(dst_addr_str));
+  // printf("%s",src_addr_str)
+  // src_stats[flow->ip_tuple.v4.src%max_src].ip_string = strdup(src_addr_str);
+  // memcpy(src_stats[flow->ip_tuple.v4.src%max_src].ip_string,src_addr_str,sizeof(*src_addr_str));
+  // printf("%s\n",src_stats[flow->ip_tuple.v4.src%max_src].ip_string);
+
 	workflow->ndpi_flows_idle[workflow->cur_idle_flows++] = flow;
 	workflow->total_idle_flows++;
+  struct ndpi_flow_struct fs ;
+  memcpy(&fs, flow->ndpi_flow, sizeof(*flow->ndpi_flow));
+  // printf("ndpi idle scan walker: %s ==> %s, total flow packets:%u \n",src_addr_str,dst_addr_str,flow->packets_processed);
       }
   }
 }
@@ -534,13 +557,15 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
       ndpi_twalk(workflow->ndpi_flows_active[idle_scan_index], ndpi_idle_scan_walker, workflow);
 
       while (workflow->cur_idle_flows > 0) {
-	struct nDPI_flow_info * const f =
-	  (struct nDPI_flow_info *)workflow->ndpi_flows_idle[--workflow->cur_idle_flows];
-	if (f->flow_fin_ack_seen == 1) {
+	struct nDPI_flow_info * const f = (struct nDPI_flow_info *)workflow->ndpi_flows_idle[--workflow->cur_idle_flows];
+	src_stats[f->ip_tuple.v4.src%max_src].idle_session +=1;
+  /*
+  if (f->flow_fin_ack_seen == 1) {
 	  printf("Free fin flow with id %u\n", f->flow_id);
 	} else {
 	  printf("Free idle flow with id %u\n", f->flow_id);
 	}
+  */
 	ndpi_tdelete(f, &workflow->ndpi_flows_active[idle_scan_index], ndpi_workflow_node_cmp);
 	ndpi_flow_info_freer(f);
 	workflow->cur_active_flows--;
@@ -551,7 +576,7 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
   }
 }
 
-static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkthdr const * const header, uint8_t const * const packet)
+static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkthdr const * const header, uint8_t const * const packet, uint32_t pkt_len)
 {
   struct ndpi_thread * const reader_thread = (struct ndpi_thread *)nDPI_thread;
   struct nDPI_workflow * workflow;
@@ -837,8 +862,10 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     }
     memset(flow_to_process->ndpi_flow, 0, SIZEOF_FLOW_STRUCT);
 
+  /*
     printf("[%8llu, %4u] new %sflow\n", workflow->packets_captured, flow_to_process->flow_id,
 	   (flow_to_process->is_midstream_flow != 0 ? "midstream-" : ""));
+    */
     if (ndpi_tsearch(flow_to_process, &workflow->ndpi_flows_active[hashed_index], ndpi_workflow_node_cmp) == NULL) {
       /* Possible Leak, but should not happen as we'd abort earlier. */
       return;
@@ -846,6 +873,9 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 
     workflow->cur_active_flows++;
     workflow->total_active_flows++;
+    // increase flow counter of the srcip
+    src_stats[flow_to_process->ip_tuple.v4.src%max_src].total_session += 1;
+
   } else {
     flow_to_process = *(struct nDPI_flow_info **)tree_result;
   }
@@ -863,8 +893,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
   /* TCP-FIN: indicates that at least one side wants to end the connection */
   if (flow.flow_fin_ack_seen != 0 && flow_to_process->flow_fin_ack_seen == 0) {
     flow_to_process->flow_fin_ack_seen = 1;
-    printf("[%8llu, %4u] end of flow\n",  workflow->packets_captured,
-	   flow_to_process->flow_id);
+    // printf("[%8llu, %4u] end of flow\n",  workflow->packets_captured, flow_to_process->flow_id);
     return;
   }
 
@@ -881,17 +910,14 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
       ndpi_detection_giveup(workflow->ndpi_struct,
 			    flow_to_process->ndpi_flow,
 			    1, &protocol_was_guessed);
+    /*
     if (protocol_was_guessed != 0) {
-      printf("[%8llu, %4d][GUESSED] protocol: %s | app protocol: %s | category: %s\n",
-	     workflow->packets_captured,
-	     flow_to_process->flow_id,
-	     ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.master_protocol),
-	     ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.app_protocol),
-	     ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.category));
+      printf("[%8llu, %4d][GUESSED] protocol: %s | app protocol: %s | category: %s\n", workflow->packets_captured,flow_to_process->flow_id,ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.master_protocol),ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.app_protocol),ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.category));
     } else {
       printf("[%8llu, %4d][FLOW NOT CLASSIFIED]\n",
 	     workflow->packets_captured, flow_to_process->flow_id);
     }
+    */
   }
 
   flow_to_process->detected_l7_protocol =
@@ -908,15 +934,30 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
       {
         flow_to_process->detection_completed = 1;
         workflow->detected_flow_protocols++;
-
+      /*
         printf("[%8llu, %4d][DETECTED] protocol: %s | app protocol: %s | category: %s\n",
 	       workflow->packets_captured,
 	       flow_to_process->flow_id,
 	       ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.master_protocol),
 	       ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.app_protocol),
 	       ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.category));
+      */
       }
     }
+
+  // TODO
+  char src_addr_str[INET6_ADDRSTRLEN+1];
+	char dst_addr_str[INET6_ADDRSTRLEN+1];
+	ip_tuple_to_string(flow_to_process, src_addr_str, sizeof(src_addr_str), dst_addr_str, sizeof(dst_addr_str));
+  if(!src_stats[flow_to_process->ip_tuple.v4.src%max_src].ip_string)
+    src_stats[flow_to_process->ip_tuple.v4.src%max_src].ip_string = strdup(src_addr_str);
+  // src_stats[flow_to_process->ip_tuple.v4.src%max_src].ip_string = strdup(src_addr_str);
+  src_stats[flow_to_process->ip_tuple.v4.src%max_src].packet_count +=1;
+  src_stats[flow_to_process->ip_tuple.v4.src%max_src].packet_volume += pkt_len;
+
+
+
+
 
   if (flow_to_process->ndpi_flow->num_extra_packets_checked <=
       flow_to_process->ndpi_flow->max_extra_packets_to_check)
@@ -932,10 +973,10 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
        *
        * EoE - End of Example
        */
-
       if (flow_to_process->flow_info_printed == 0)
       {
         char const * const flow_info = ndpi_get_flow_info(flow_to_process->ndpi_flow, &flow_to_process->detected_l7_protocol);
+        /*
         if (flow_info != NULL)
         {
           printf("[%8llu, %4d] info: %s\n",
@@ -944,6 +985,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
             flow_info);
           flow_to_process->flow_info_printed = 1;
         }
+        */
       }
 
       if (flow_to_process->detected_l7_protocol.master_protocol == NDPI_PROTOCOL_TLS ||
@@ -992,7 +1034,6 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 }
 
 
-
 /*
  * The lcore main. This is the main thread that does the work, reading from
  * an input port, and do processing on the metrics.
@@ -1002,7 +1043,7 @@ static int lcore_main(__rte_unused void *dummy){
   struct rte_mbuf *m;
   unsigned int i,j, port, lcore_id, nb_rx, nb_tx;
   struct lcore_queue_conf *qconf;
-  struct ipv4_flow flow_stats[max_number_of_flows];
+  
   lcore_id = rte_lcore_id();
   qconf = &lcore_queue_conf[lcore_id];
 
@@ -1029,7 +1070,7 @@ static int lcore_main(__rte_unused void *dummy){
         int c = 0; // interval counter
         struct rte_ipv4_hdr *ipv4_hdr;
         struct rte_mbuf *pkt;
-        int p = 1; // training phases
+        int p = 0; // training phases
         int cp = 0;
         int v_max = 0;
         int v_min = 3000;
@@ -1071,15 +1112,15 @@ static int lcore_main(__rte_unused void *dummy){
                                                 
                                                 uint16_t packetLength = rte_pktmbuf_pkt_len(pkt);
                                                 uint16_t payloadLength = packetLength - pkt->l2_len - pkt->l3_len - pkt->l4_len;
-                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
-                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
-
+                                                // flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
+                                                // flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
+                                                uint32_t pkt_len = pkt->pkt_len;
                                                 char *data = rte_pktmbuf_mtod(pkt, char *);
                                                 int len = rte_pktmbuf_pkt_len(pkt);
                                                 struct pcap_pkthdr h;
                                                 h.len = h.caplen = len;
                                                 gettimeofday(&h.ts, NULL);
-                                                ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data);
+                                                ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data,pkt_len+payloadLength);
                                                 
                                         }
                                         
@@ -1101,12 +1142,14 @@ static int lcore_main(__rte_unused void *dummy){
                         // a time interval passed
                         
                         printf("Number of packets in %d time interval: %d\n",c,number_of_packets_in_a_interval);
+                        
                         number_of_packets_in_a_interval = 0;
+                        
                         /*
                         for(int s=0;s<max_number_of_flows;s++){
                                 char a,b,c,d;
                                 uint32_t_to_char(rte_bswap32(ipv4_hdr->src_addr), &a, &b, &c, &d);
-                                printf("%3hhu.%3hhu.%3hhu.%3hhu\t %d %d",a,b,c,d,flow_stats[s].num_packets,flow_stats[s].volume); 
+                                // printf("%3hhu.%3hhu.%3hhu.%3hhu\t %d %d",a,b,c,d,flow_stats[s].num_packets,flow_stats[s].volume); 
                         }
                         */
                         // system("clear");
@@ -1140,10 +1183,6 @@ static int lcore_main(__rte_unused void *dummy){
                         }
                         
                 }
-
-                
-                  
-
                 if(training==true){
                         printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
@@ -1151,7 +1190,22 @@ static int lcore_main(__rte_unused void *dummy){
                         printf("v_max = %i\n",v_max);
                         printf("v_min = %i\n",v_min);
                 }
-                printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->cur_active_flows);
+                // printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->cur_active_flows);
+                // TODO: print each srIP packet count
+                // printf("packet count of srcIP\n");
+                /*
+                for(uint16_t c=0;c<ndpi_threads[lcore_id].workflow->total_active_flows;c++){
+                  printf("\t packet counts for  : ",srcIP)
+                }
+                */
+                /*
+                printf("max active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->max_active_flows);
+                printf("total active flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->total_active_flows);
+                printf("current idle flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->cur_idle_flows);
+                printf("max idle flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->max_idle_flows);
+                printf("total idle flows for %u : %llu \n",lcore_id,ndpi_threads[lcore_id].workflow->total_idle_flows);
+                */
+
                 start_time = clock();
                 end_time = clock();
                 // testing
@@ -1171,15 +1225,16 @@ static int lcore_main(__rte_unused void *dummy){
                                         
                                                 uint16_t packetLength = rte_pktmbuf_pkt_len(pkt);
                                                 uint16_t payloadLength = packetLength - pkt->l2_len - pkt->l3_len - pkt->l4_len;
-                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
-                                                flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
+                                                // flow_stats[ipv4_hdr->src_addr % max_number_of_flows].num_packets++;
+                                                // flow_stats[ipv4_hdr->src_addr % max_number_of_flows].volume+=payloadLength;
 
                                                 char *data = rte_pktmbuf_mtod(pkt, char *);
                                                 int len = rte_pktmbuf_pkt_len(pkt);
                                                 struct pcap_pkthdr h;
+                                                // printf("current captured packet len is %d\n",len); //uncomment
                                                 h.len = h.caplen = len;
                                                 gettimeofday(&h.ts, NULL);
-                                                ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data);
+                                                ndpi_process_packet(&ndpi_threads[lcore_id],&h, (const u_char *)data,len);
                                                 // printf("current active flows for %u : %llu \n",lcore_id,ndpi_threads[i].workflow->total_active_flows);
                                 }
 
@@ -1198,9 +1253,6 @@ static int lcore_main(__rte_unused void *dummy){
                 }
                 // a time interval passed
                 printf("Number of packets in current time interval: %u\n",number_of_packets_in_a_interval);
-                
-                
-                
                 // calculate WMA predict for next interval
                 qsort(&interval_buffer, max_number_of_flows_in_a_interval, sizeof(int), compare);
                 // WMA algorithm on current window
@@ -1245,11 +1297,20 @@ static int lcore_main(__rte_unused void *dummy){
                 // free(interval_buffer);
                 for (int ii = 0; ii < number_of_packets_in_a_interval; ii++)
                         interval_buffer[i] = 0;
-                if (c%window_size==0) // window size reached
-                        c=0;
-                
+                if (c%window_size==0){
+                   // window size reached
+                   printf("=================\n");
+                    printf("=================\n");
+                   for(uint16_t uu=0;uu<max_src;uu++){
+                        
+                      if(src_stats[uu].total_session>0)
+                          // system("clear");
+                          
+                          printf("%s , %u , %u , %u, %u\n",src_stats[uu].ip_string, src_stats[uu].packet_count, src_stats[uu].total_session, (src_stats[uu].total_session - src_stats[uu].idle_session),src_stats[uu].packet_volume); //uncomment
+                    }
+                   c=0;
+                }
         }
-
         return 0;
 }
 
@@ -1351,7 +1412,7 @@ int main(int argc, char *argv[]){
   for(unsigned int li=0;li<RTE_MAX_LCORE;li++){
     qconf = &lcore_queue_conf[li];
     if (qconf->n_rx_port != 0) {
-      printf("current active flows for %u : %llu \n",li,ndpi_threads[li].workflow->cur_active_flows);
+      printf("current active flows for %u : %llu  , total flows: %llu\n",li,ndpi_threads[li].workflow->cur_active_flows, ndpi_threads[li].workflow->total_active_flows);
     }
   }
 
