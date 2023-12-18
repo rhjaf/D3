@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,16 +17,14 @@
 #include <stdbool.h>
 #include <math.h>
 #include <time.h>
-#include <pcap/pcap.h>
-#include <ndpi_main.h> // nDPI module
-#include <ndpi_typedefs.h>
-#include <ndpi_api.h>
 #include<stdio.h>
 #include<stdlib.h>
-
+#include <limits.h>
+#include <pcap/pcap.h>
 #ifdef __linux__
 #include <sched.h>
 #endif
+
 
 
 #include <rte_common.h>
@@ -51,6 +50,12 @@
 #include <rte_flow.h>
 
 
+#include <ndpi_main.h> // nDPI module
+#include <ndpi_typedefs.h>
+#include <ndpi_api.h>
+
+
+
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
 #define MAX_RX_QUEUE_PER_LCORE 16
 #define MAX_TX_QUEUE_PER_PORT 16
@@ -65,6 +70,26 @@
 #define max_src 3000
 #define V_PRED 3
 #define R_PRED 3
+// ndpi definitions
+#define MAX_FLOW_ROOTS 200000 // max active flows for each workflow
+#define MAX_IDLE_FLOWS 64
+#define TICK_RESOLUTION 1000
+#define IDLE_SCAN_PERIOD 5000 // msec
+#define MAX_IDLE_TIME 3000 // msec
+// #define MAX_IDLE_TIME 5000 // msec
+
+
+#ifndef ETH_P_IP
+#define ETH_P_IP 0x0800
+#endif
+
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6 0x86DD
+#endif
+
+#ifndef ETH_P_ARP
+#define ETH_P_ARP  0x0806
+#endif
 
 
 static uint16_t nb_rxd = RX_DESC_DEFAULT;
@@ -96,39 +121,7 @@ struct l2fwd_port_statistics {
 } __rte_cache_aligned;
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
-struct src_stat{
-  char * ip_string;
-  uint16_t packet_count;
-  uint16_t packet_volume;
-  uint16_t total_session;
-  uint16_t idle_session;
-};
-struct src_stat src_stats[max_src];
 
-
-
-
-// ndpi definitions
-
-#define MAX_FLOW_ROOTS 200000 // max active flows for each workflow
-#define MAX_IDLE_FLOWS 64
-#define TICK_RESOLUTION 1000
-#define IDLE_SCAN_PERIOD 5000 // msec
-#define MAX_IDLE_TIME 3000 // msec
-// #define MAX_IDLE_TIME 5000 // msec
-
-
-#ifndef ETH_P_IP
-#define ETH_P_IP 0x0800
-#endif
-
-#ifndef ETH_P_IPV6
-#define ETH_P_IPV6 0x86DD
-#endif
-
-#ifndef ETH_P_ARP
-#define ETH_P_ARP  0x0806
-#endif
 
 enum nDPI_l3_type {
   L3_IP, L3_IP6
@@ -210,31 +203,7 @@ struct ndpi_thread {
   // uint32_t array_index;
 };
 static struct ndpi_thread ndpi_threads[RTE_MAX_LCORE] = {};
-
 static volatile long int flow_id = 0;
-
-
-void clearScreen() {
-    printf("\033[2J\033[1;1H");
-}
-
-
-
-// Comparison function for qsort
-int compare(const void *a, const void *b) {
-    int *x = (int *)a;
-    int *y = (int *)b;
-    return *y - *x;
-}
-
-int find_max(const int arr[],int arr_size){
-        int max = arr[0];
-        for(int i=0;i<arr_size;i++){
-                if (arr[i]>max)
-                        max = arr[i];
-        }
-        return max;
-}
 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
@@ -311,62 +280,6 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         return 0;
 }
 
-double sum(int arr[],int arr_size){
-  int res = 0;
-  for(int i=0;i<arr_size;i++)
-    res+=arr[i];
-  return res;
-}
-
-double mean(int arr[],int arr_size){
-  int res = 0;
-  for(int i=0;i<arr_size;i++)
-    res+=arr[i];
-  res/=(double)arr_size;
-  return res;
-}
-
-double var(int arr[],int arr_size,double avg){
-  double res=0;
-  for(int i=0;i<arr_size;i++)
-    res+= res+pow((arr[i]-avg),2);
-  res/=(double)arr_size;
-  return res;
-}
-
-void append(int arr[],int arr_size,int item){
-  int *res = malloc(sizeof(item)*arr_size);
-  for(int i=0;i<arr_size;i++){
-    res[i] = arr[i+1];
-  }
-  res[arr_size-1] = item;
-  memcpy(res,arr,arr_size);
-}
-
-
-#define window_size 10
-#define app_types 368
-
-
-// custom struct
-typedef struct app_info{
-  uint64_t max_counter; // initalize =0
-  uint64_t min_counter; // initalize =0
-  uint64_t counter_window[window_size];
-  uint64_t interval_counter;
-  uint64_t ratio_window[window_size];
-  double ratio_pred;
-
-} app_info;
-
-
-app_info apps[app_types];
-
-
-
-
-
-// nDPI methods
 static void free_workflow(struct nDPI_workflow ** const workflow);
 
 // static struct nDPI_workflow * init_workflow(char const * const file_or_device)
@@ -568,6 +481,92 @@ static void ndpi_idle_scan_walker(void const * const A, ndpi_VISIT which, int de
   }
 }
 
+
+
+
+#define window_size 10
+#define app_types 368
+
+struct src_stat{
+  char * ip_string;
+  uint16_t packet_count;
+  uint16_t packet_volume;
+  uint16_t total_session;
+  uint16_t idle_session;
+};
+struct src_stat src_stats[max_src];
+
+typedef struct app_info{
+  uint64_t max_counter; // initalize =0
+  uint64_t min_counter; // initalize =0
+  uint64_t counter_window[window_size];
+  uint64_t interval_counter;
+  uint64_t ratio_window[window_size];
+  double ratio_pred;
+  uint16_t new_session; // new session for this application
+  uint16_t source_count[max_src]; // Active Source IP entropy of each application 
+} app_info;
+
+app_info apps[app_types] = {
+  [0 ... app_types-1] = {.min_counter=INT_MAX}
+};
+
+void clearScreen() {
+    printf("\033[2J\033[1;1H");
+}
+
+// Comparison function for qsort
+int compare(const void *a, const void *b) {
+    int *x = (int *)a;
+    int *y = (int *)b;
+    return *y - *x;
+}
+
+int find_max(const int arr[],int arr_size){
+        int max = arr[0];
+        for(int i=0;i<arr_size;i++){
+                if (arr[i]>max)
+                        max = arr[i];
+        }
+        return max;
+}
+
+double sum(int arr[],int arr_size){
+  int res = 0;
+  for(int i=0;i<arr_size;i++)
+    res+=arr[i];
+  return res;
+}
+
+double mean(int arr[],int arr_size){
+  int res = 0;
+  for(int i=0;i<arr_size;i++)
+    res+=arr[i];
+  res/=(double)arr_size;
+  return res;
+}
+
+double var(int arr[],int arr_size,double avg){
+  double res=0;
+  for(int i=0;i<arr_size;i++)
+    res+= res+pow((arr[i]-avg),2);
+  res/=(double)arr_size;
+  return res;
+}
+
+void append(uint64_t arr[],int arr_size,uint64_t item){
+  
+  uint64_t *res = malloc(sizeof(uint64_t)*arr_size);
+  for(int i=0;i<arr_size-1;i++){
+    res[i] = arr[i+1];
+  }
+  res[arr_size-1] = item;
+  memcpy(arr,res,sizeof(uint64_t)*arr_size);
+  free(res);
+}
+
+
+
 static void check_for_idle_flows(struct nDPI_workflow * const workflow)
 {
   if (workflow->last_idle_scan_time + IDLE_SCAN_PERIOD < workflow->last_time) {
@@ -577,6 +576,7 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
       while (workflow->cur_idle_flows > 0) {
 	      struct nDPI_flow_info * const f = (struct nDPI_flow_info *)workflow->ndpi_flows_idle[--workflow->cur_idle_flows];
 	      src_stats[f->ip_tuple.v4.src%max_src].idle_session +=1;
+        apps[f->detected_l7_protocol.master_protocol].source_count[f->ip_tuple.v4.src%max_src]--;
         if (f->flow_fin_ack_seen == 1) {
           // remove_comment
         /*
@@ -589,6 +589,7 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
           */
 	      }
 	      ndpi_tdelete(f, &workflow->ndpi_flows_active[idle_scan_index], ndpi_workflow_node_cmp);
+        
 	      ndpi_flow_info_freer(f);
 	      workflow->cur_active_flows--;
       }
@@ -596,6 +597,9 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
     workflow->last_idle_scan_time = workflow->last_time;
   }
 }
+
+
+
 
 static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkthdr const * const header, uint8_t const * const packet, uint32_t pkt_len)
 {
@@ -759,7 +763,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 #ifdef VERBOSE
   print_packet_info(header, l4_len, &flow);
 #endif
-
+  bool new_flow=false;
   /* calculate flow hash for btree find, search(insert) */
   if (flow.l3_type == L3_IP) {
     if (ndpi_flowv4_flow_hash(flow.l4_protocol, flow.ip_tuple.v4.src, flow.ip_tuple.v4.dst, flow.src_port, flow.dst_port, 0, 0, (uint8_t *)&flow.hashval, sizeof(flow.hashval)) != 0)
@@ -850,6 +854,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     workflow->total_active_flows++;
     // increase flow counter of the srcip
     src_stats[flow_to_process->ip_tuple.v4.src%max_src].total_session += 1;
+    new_flow = true;
 
   } else {
     flow_to_process = *(struct nDPI_flow_info **)tree_result;
@@ -920,6 +925,14 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 	       ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.category));
          */
          apps[flow_to_process->detected_l7_protocol.master_protocol].interval_counter+=pkt_len;
+         apps[flow_to_process->detected_l7_protocol.master_protocol].source_count[flow_to_process->ip_tuple.v4.src%max_src]++;
+         if(new_flow)
+          apps[flow_to_process->detected_l7_protocol.master_protocol].new_session+=1;
+         /*
+         printf("app_types : %d",flow_to_process->detected_l7_protocol.master_protocol);
+         printf("\tv_max = %" PRIu64 " v_min = %" PRIu64" ",apps[flow_to_process->detected_l7_protocol.master_protocol].max_counter,apps[flow_to_process->detected_l7_protocol.master_protocol].min_counter);
+         printf(" interval_counter = %" PRIu64 " ratio_pred = %" PRIu64"\n",apps[flow_to_process->detected_l7_protocol.master_protocol].interval_counter,apps[flow_to_process->detected_l7_protocol.master_protocol].ratio_pred);
+        */
       }
     }
 
@@ -932,24 +945,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
   src_stats[flow_to_process->ip_tuple.v4.src%max_src].packet_count +=1;
   src_stats[flow_to_process->ip_tuple.v4.src%max_src].packet_volume += pkt_len;
  
-  if (flow_to_process->ndpi_flow->num_extra_packets_checked <= flow_to_process->ndpi_flow->max_extra_packets_to_check)
-    {
-      /*
-        bussiness logic
-       */
-      if (flow_to_process->flow_info_printed == 0)
-      {
-        char const * const flow_info = ndpi_get_flow_info(flow_to_process->ndpi_flow, &flow_to_process->detected_l7_protocol);
-        
-        if (flow_info != NULL)
-        {
-          // remove_comment
-          // printf("[%8llu, %4d] info: %s\n", workflow->packets_captured, flow_to_process->flow_id, flow_info);
-          flow_to_process->flow_info_printed = 1;
-        }
-        
-      }
-    }
+  
 }
 
 
@@ -962,7 +958,9 @@ static int lcore_main(__rte_unused void *dummy){
   struct rte_mbuf *m;
   unsigned int i,j, port, lcore_id, nb_rx, nb_tx;
   struct lcore_queue_conf *qconf;
-  double r_u, r_l,r_pred;
+  double r_u=INT_MAX;
+  double r_l=INT_MAX;
+  double r_pred;
   uint64_t v_pred;
   double avg,sd;
   lcore_id = rte_lcore_id();
@@ -986,30 +984,21 @@ static int lcore_main(__rte_unused void *dummy){
         int c = 0; // interval counter
         struct rte_ipv4_hdr *ipv4_hdr;
         struct rte_mbuf *pkt;
-        int p = 0; // training phases
-        int cp = 0;
+        int p = 1; // training phases
         bool training = true;      
         i=0;
         long long int number_of_packets_in_a_interval;
-
-
-
-        for (int ii = 0; ii < app_types; ii++){
-          for(int jj=0;jj<window_size;jj++){
-            apps[ii].counter_window[jj] = 0;
-            apps[ii].ratio_window[jj] = 0;
-          }
-        }
+        clock_t interval_len = CLOCKS_PER_SEC;
 
         while(!force_quit){        
                 start_time = clock();
                 end_time = clock();
                 number_of_packets_in_a_interval = 0;
                 // training
-                while(cp<p && training){
+                while(!(c/window_size==p) && training){
                         start_time = clock();
                         end_time = clock();
-                        while(((end_time - start_time) / CLOCKS_PER_SEC)<1){
+                        while((((end_time - start_time) / interval_len)<1) && (!force_quit)){
                                 // recieving packets
                                 for (i = 0; i < qconf->n_rx_port; i++) {
                                         port = qconf->rx_port_list[i];
@@ -1046,36 +1035,30 @@ static int lcore_main(__rte_unused void *dummy){
                         // a time interval passed    
                         clearScreen();
                         printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
-                        for(int i=0;i<368;i++){
+                        for(int i=0;i<app_types;i++){
                           if (apps[i].interval_counter > apps[i].max_counter)
-                              apps[i].max_counter = apps[i].interval_counter;
-                          if(apps[i].interval_counter < apps[i].min_counter)
-                              apps[i].min_counter = apps[i].interval_counter;
+                            apps[i].max_counter = apps[i].interval_counter;
+                          else if((apps[i].interval_counter!=0) && (apps[i].interval_counter < apps[i].min_counter))
+                            apps[i].min_counter = apps[i].interval_counter;
+                          else if((apps[i].interval_counter==0) && (apps[i].max_counter!=0))
+                            apps[i].min_counter = 0;
                           apps[i].interval_counter = 0;
-                        }
-                        
+                          apps[i].new_session=0;
+                        }                        
                         ++c;
-                        if ((c%window_size)==0){
-                                // window size reached
-                                // TODO calculate WMA of througput but do not alert
-                                c=0;
-                                cp++;
-                        }
+                        number_of_packets_in_a_interval = 0;
                         
                 }
+                
                 if(training==true){
                         printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
                         training = false;
-                        for (int ii = 0; ii < app_types; ii++){
-                          printf("app_types : %d",app_types);
-                          printf("\tv_max = %" PRIu64 " v_min = %" PRIu64"\n",apps[i].max_counter,apps[i].min_counter);
-                        }
-                }
-
-                start_time = clock();
-                end_time = clock();
+                        start_time = clock();
+                        end_time = clock();
+                }                
                 // testing
+                
                 while(((end_time - start_time) / CLOCKS_PER_SEC)<1){
                         // recieving packets
                         for (i = 0; i < qconf->n_rx_port; i++) {
@@ -1099,7 +1082,7 @@ static int lcore_main(__rte_unused void *dummy){
                                 }
                                 // sending packets back
                                 nb_tx = rte_eth_tx_burst(port ^ 1, 0, pkts_burst, nb_rx);
-			                          /* Free any unsent packets. */
+			                          // Free any unsent packets. 
 			                          if (unlikely(nb_tx < nb_rx)) {
 				                        uint16_t buf;
 				                        for (buf = nb_tx; buf < nb_rx; buf++)
@@ -1112,43 +1095,55 @@ static int lcore_main(__rte_unused void *dummy){
                 // a time interval passed
                 clearScreen();
                 printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
-                for(int i=0;i<368;i++){
-                    qsort(&apps[i].counter_window[c], window_size, sizeof(uint64_t), compare);
+                for(int rh=0;rh<1;rh++){
+                    uint64_t *tmp = malloc(sizeof(uint64_t)*window_size);
+                    memcpy(tmp,apps[rh].counter_window,window_size*sizeof(uint64_t));
+                    qsort(apps[rh].counter_window, window_size, sizeof(uint64_t), compare);
                     v_pred = 0;
                     r_pred = 0;
                     for(int t=0;t<window_size;t++){
-                      if (apps[i].counter_window[c]>0){
-                        v_pred += apps[i].counter_window[t] * ((double)apps[i].counter_window[t]/(double)sum(&apps[i].counter_window[c],window_size));
-                      }
+                      if (apps[rh].counter_window[t]>0)
+                        v_pred += apps[rh].counter_window[t] * (double)(t+1); 
                       else
                         break;
                     }
+                    v_pred/=(double)55;
                     if(v_pred<=0)
                       v_pred = V_PRED;
-                    r_pred = apps[i].interval_counter / v_pred;
+                    r_pred = apps[rh].interval_counter / v_pred;
                     if(r_pred<=0)
                       r_pred = R_PRED;
                     
-                    avg = mean(apps[i].ratio_window,window_size);
-                    sd = sqrt(var(apps[i].ratio_window,window_size,avg));
+                    avg = mean(apps[rh].ratio_window,window_size);
+                    sd = sqrt(var(apps[rh].ratio_window,window_size,avg));
                     r_u = avg + 3 * sd;
                     r_l = avg - 3 * sd;
-                    // alert DDoS detection
-                    if ((r_pred > r_u && apps[i].interval_counter>apps[i].max_counter) || (r_pred < r_l && apps[i].interval_counter < apps[i].min_counter))
-                            printf("A ddos attack has been occured!");
-                    else {
-                      append(apps[i].ratio_window,window_size,r_pred);
-                      append(apps[i].counter_window,window_size,apps[i].interval_counter);
+                    
+
+                    if (((r_pred > r_u) && (apps[rh].interval_counter>apps[rh].max_counter) && (r_u!=0 && r_l!=0 && r_u!=r_l)) || ((r_pred < r_l) && (apps[rh].interval_counter < apps[rh].min_counter) && (r_u!=0 && r_l!=0 && r_u!=r_l)))
+                    {        // alert DDoS detection
+                            printf("A ddos attack has been occured!\n");
                     }
-  
-                    apps[i].interval_counter = 0;
+                    else {
+                      append(apps[rh].ratio_window,window_size,r_pred);
+                      append(tmp,window_size,apps[rh].interval_counter);
+                      memcpy(apps[rh].counter_window,tmp,window_size*sizeof(uint64_t));
+                    }
+                    int src_counter=0;
+                    for(int ic=0;ic<max_src;ic++){
+                      if(apps[rh].source_count[ic]>0)
+                        src_counter++;
+                    }
+                    printf("  v_max = %" PRIu64 " v_min = %" PRIu64 " v_pred = %" PRIu64 " uinque_sIP = %d",apps[rh].max_counter,apps[rh].min_counter,v_pred,src_counter);
+                    printf("  interval_counter = %" PRIu64 " new_session = %" PRIu16" ratio_pred = %f\n",apps[rh].interval_counter,apps[rh].new_session,r_pred);
+                  
+                    apps[rh].interval_counter = 0;
+                    apps[rh].new_session=0;
+                    free(tmp);
                     }
                 number_of_packets_in_a_interval = 0;
-                v_pred = 0;
                 c++;
-                // free(interval_buffer);
-                for (int ii = 0; ii < 368; ii++)
-                        apps[ii].interval_counter = 0;
+                //print source IP stats
                 if (c%window_size==0){
                    // window size reached
                    printf("=================\n");
@@ -1162,6 +1157,8 @@ static int lcore_main(__rte_unused void *dummy){
                     }
                    c=0;
                 }
+                
+                
         }
         return 0;
 }
