@@ -111,7 +111,7 @@ struct lcore_queue_conf {
 } __rte_cache_aligned;
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-static unsigned int l2fwd_rx_queue_per_lcore = 2; // RX queues per lcore
+static unsigned int l2fwd_rx_queue_per_lcore = 1; // RX queues per lcore
 
 /* Per-port statistics struct */
 struct l2fwd_port_statistics {
@@ -208,9 +208,9 @@ static volatile long int flow_id = 0;
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
-        const uint16_t rx_rings = 2;
+        const uint16_t rx_rings = 1;
 
-        const uint16_t tx_rings = 4;
+        const uint16_t tx_rings = 1;
         
         int retval;
         uint16_t q;
@@ -1219,7 +1219,7 @@ int main(int argc, char *argv[]){
 		printf("Lcore %u: RX port %u\n", rx_lcore_id, portid);
 	}
 
-
+  printf( "nb_lcores:%d\n",nb_lcores);
         
   /* Creates a new mbuf mempool in memory to hold the mbufs objects (that store packets).
   containts NUM_MBUFS * nb_ports of mbuf pkts in it with each of them's size is RTE_MBUF_DEFAULT_BUF_SIZE
