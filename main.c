@@ -57,8 +57,9 @@
 
 
 #define RTE_LOGTYPE_DDD RTE_LOGTYPE_USER1
-#define MAX_RX_QUEUE_PER_LCORE 16
-#define MAX_TX_QUEUE_PER_PORT 16
+#define MAX_RX_QUEUE_PER_LCORE 1 // RX queues per lcore
+#define MAX_RX_QUEUE_PER_PORT 1
+#define MAX_TX_QUEUE_PER_PORT 1
 #define RX_DESC_DEFAULT 1024
 #define TX_DESC_DEFAULT 1024
 #define MBUF_CACHE_SIZE 256
@@ -111,7 +112,6 @@ struct lcore_queue_conf {
 } __rte_cache_aligned;
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-static unsigned int l2fwd_rx_queue_per_lcore = 1; // RX queues per lcore
 
 /* Per-port statistics struct */
 struct l2fwd_port_statistics {
@@ -208,9 +208,9 @@ static volatile long int flow_id = 0;
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
         struct rte_eth_conf port_conf = port_conf_default;
-        const uint16_t rx_rings = 1;
+        const uint16_t rx_rings = MAX_RX_QUEUE_PER_PORT;
 
-        const uint16_t tx_rings = 1;
+        const uint16_t tx_rings = MAX_TX_QUEUE_PER_PORT;
         
         int retval;
         uint16_t q;
@@ -228,18 +228,25 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         /* Configure the Ethernet device. */
         
         retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
-        if (retval != 0)
-                return retval;
-
+        if (retval != 0){
+          printf("can not configure device\n");
+          return retval;
+        
+        }
         retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
-        if (retval != 0)
-                return retval;
+        if (retval != 0){
+          printf("can not buffer descriptor device\n");
+          return retval;
+        
+        }
 
         /* Allocate and set up RX queue per Ethernet port. */ 
         for (q = 0; q < rx_rings; q++) {
                 retval = rte_eth_rx_queue_setup(port, q, nb_rxd, rte_eth_dev_socket_id(port), NULL, mbuf_pool);
-                if (retval < 0)
-                        return retval;
+                if (retval < 0){
+                    printf("rx queue %d allocation failed\n",q);
+                    return retval;
+                }
         }
         /* Allocate and set up TX queue per Ethernet port. */ 
         txconf = dev_info.default_txconf;
@@ -497,6 +504,7 @@ struct src_stat{
 struct src_stat src_stats[max_src];
 
 typedef struct app_info{
+  char * app_name;
   uint64_t max_counter; // initalize =0
   uint64_t min_counter; // initalize =0
   uint64_t counter_window[window_size];
@@ -576,7 +584,7 @@ static void check_for_idle_flows(struct nDPI_workflow * const workflow)
       while (workflow->cur_idle_flows > 0) {
 	      struct nDPI_flow_info * const f = (struct nDPI_flow_info *)workflow->ndpi_flows_idle[--workflow->cur_idle_flows];
 	      src_stats[f->ip_tuple.v4.src%max_src].idle_session +=1;
-        apps[f->detected_l7_protocol.master_protocol].source_count[f->ip_tuple.v4.src%max_src]--;
+        apps[f->detected_l7_protocol.app_protocol].source_count[f->ip_tuple.v4.src%max_src]--;
         if (f->flow_fin_ack_seen == 1) {
           // remove_comment
         /*
@@ -639,7 +647,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
   check_for_idle_flows(workflow);
 
   if (header->len < sizeof(struct ndpi_ethhdr)) {
-      fprintf(stderr, "[%8llu] Ethernet packet too short - skipping\n", workflow->packets_captured);
+      // fprintf(stderr, "[%8llu] Ethernet packet too short - skipping\n", workflow->packets_captured);
       return;
   }
   ethernet = (struct ndpi_ethhdr *) &packet[eth_offset];
@@ -648,20 +656,20 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
   switch (type) {
     case ETH_P_IP: // IPv4
       if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_iphdr)) {
-	      fprintf(stderr, "[%8llu] IP packet too short - skipping\n", workflow->packets_captured);
+	      // fprintf(stderr, "[%8llu] IP packet too short - skipping\n", workflow->packets_captured);
 	      return;
       }
       break;
     case ETH_P_IPV6: // IPV6
       if (header->len < sizeof(struct ndpi_ethhdr) + sizeof(struct ndpi_ipv6hdr)) {
-	      fprintf(stderr, "[%8llu] IP6 packet too short - skipping\n", workflow->packets_captured);
+	      // fprintf(stderr, "[%8llu] IP6 packet too short - skipping\n", workflow->packets_captured);
 	      return;
       }
       break;
     case ETH_P_ARP: // ARP
       return;
     default:
-      fprintf(stderr, "[%8llu] Unknown Ethernet packet with type 0x%X - skipping\n", workflow->packets_captured, type);
+      // fprintf(stderr, "[%8llu] Unknown Ethernet packet with type 0x%X - skipping\n", workflow->packets_captured, type);
       return;
   }
 
@@ -672,27 +680,27 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     ip = NULL;
     ip6 = (struct ndpi_ipv6hdr *)&packet[ip_offset];
   } else {
-    fprintf(stderr, "[%8llu] Captured non IPv4/IPv6 packet with type 0x%X - skipping\n", workflow->packets_captured, type);
+    // fprintf(stderr, "[%8llu] Captured non IPv4/IPv6 packet with type 0x%X - skipping\n", workflow->packets_captured, type);
     return;
   }
   ip_size = header->len - ip_offset;
 
   if (type == ETH_P_IP && header->len >= ip_offset) {
     if (header->caplen < header->len) {
-      fprintf(stderr, "[%8llu] Captured packet size is smaller than packet size: %u < %u\n", workflow->packets_captured, header->caplen, header->len);
+      // fprintf(stderr, "[%8llu] Captured packet size is smaller than packet size: %u < %u\n", workflow->packets_captured, header->caplen, header->len);
     }
   }
   /* process layer3 e.g. IPv4 / IPv6 */
   if (ip != NULL && ip->version == 4) {
     if (ip_size < sizeof(*ip)) {
-      fprintf(stderr, "[%8llu] Packet smaller than IP4 header length: %u < %zu\n", workflow->packets_captured, ip_size, sizeof(*ip));
+      // fprintf(stderr, "[%8llu] Packet smaller than IP4 header length: %u < %zu\n", workflow->packets_captured, ip_size, sizeof(*ip));
       return;
     }
 
     flow.l3_type = L3_IP;
     if (ndpi_detection_get_l4((uint8_t*)ip, ip_size, &l4_ptr, &l4_len, &flow.l4_protocol, NDPI_DETECTION_ONLY_IPV4) != 0)
       {
-	      fprintf(stderr, "[%8llu] nDPI IPv4/L4 payload detection failed, L4 length: %zu\n", workflow->packets_captured, ip_size - sizeof(*ip));
+	      // fprintf(stderr, "[%8llu] nDPI IPv4/L4 payload detection failed, L4 length: %zu\n", workflow->packets_captured, ip_size - sizeof(*ip));
 	      return;
       }
 
@@ -700,14 +708,14 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     flow.ip_tuple.v4.dst = ip->daddr;
   } else if (ip6 != NULL) {
     if (ip_size < sizeof(ip6->ip6_hdr)) {
-        fprintf(stderr, "[%8llu] Packet smaller than IP6 header length: %u < %zu\n", workflow->packets_captured, ip_size, sizeof(ip6->ip6_hdr));
+        // fprintf(stderr, "[%8llu] Packet smaller than IP6 header length: %u < %zu\n", workflow->packets_captured, ip_size, sizeof(ip6->ip6_hdr));
         return;
     }
 
     flow.l3_type = L3_IP6;
     if (ndpi_detection_get_l4((uint8_t*)ip6, ip_size, &l4_ptr, &l4_len, &flow.l4_protocol, NDPI_DETECTION_ONLY_IPV6) != 0)
     {
-	    fprintf(stderr, "[%8llu] nDPI IPv6/L4 payload detection failed, L4 length: %zu\n", workflow->packets_captured, ip_size - sizeof(*ip6));
+	    // fprintf(stderr, "[%8llu] nDPI IPv6/L4 payload detection failed, L4 length: %zu\n", workflow->packets_captured, ip_size - sizeof(*ip6));
 	    return;
     }
 
@@ -726,7 +734,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
       min_addr[1] = flow.ip_tuple.v6.src[0];
     }
   } else {
-    fprintf(stderr, "[%8llu] Non IP/IPv6 protocol detected: 0x%X\n", workflow->packets_captured, type);
+    // fprintf(stderr, "[%8llu] Non IP/IPv6 protocol detected: 0x%X\n", workflow->packets_captured, type);
     return;
   }
 
@@ -735,7 +743,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     const struct ndpi_tcphdr * tcp;
 
     if (header->len < (l4_ptr - packet) + sizeof(struct ndpi_tcphdr)) {
-      fprintf(stderr, "[%8llu] Malformed TCP packet, packet size smaller than expected: %u < %zu\n", workflow->packets_captured, header->len, (l4_ptr - packet) + sizeof(struct ndpi_tcphdr));
+      // fprintf(stderr, "[%8llu] Malformed TCP packet, packet size smaller than expected: %u < %zu\n", workflow->packets_captured, header->len, (l4_ptr - packet) + sizeof(struct ndpi_tcphdr));
       return;
     }
     tcp = (struct ndpi_tcphdr *)l4_ptr;
@@ -748,7 +756,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     const struct ndpi_udphdr * udp;
 
     if (header->len < (l4_ptr - packet) + sizeof(struct ndpi_udphdr)) {
-      fprintf(stderr, "[%8llu] Malformed UDP packet, packet size smaller than expected: %u < %zu\n", workflow->packets_captured, header->len, (l4_ptr - packet) + sizeof(struct ndpi_udphdr));
+      // fprintf(stderr, "[%8llu] Malformed UDP packet, packet size smaller than expected: %u < %zu\n", workflow->packets_captured, header->len, (l4_ptr - packet) + sizeof(struct ndpi_udphdr));
       return;
     }
     udp = (struct ndpi_udphdr *)l4_ptr;
@@ -822,13 +830,13 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
   if (tree_result == NULL) {
     /* flow still not found, must be new */
     if (workflow->cur_active_flows == workflow->max_active_flows) {
-      fprintf(stderr, "[%8llu] max flows to track reached: %llu, idle: %llu\n", workflow->packets_captured, workflow->max_active_flows, workflow->cur_idle_flows);
+      // fprintf(stderr, "[%8llu] max flows to track reached: %llu, idle: %llu\n", workflow->packets_captured, workflow->max_active_flows, workflow->cur_idle_flows);
       return;
     }
 
     flow_to_process = (struct nDPI_flow_info *)ndpi_malloc(sizeof(*flow_to_process));
     if (flow_to_process == NULL) {
-      fprintf(stderr, "[%8llu] Not enough memory for flow info\n", workflow->packets_captured);
+      // fprintf(stderr, "[%8llu] Not enough memory for flow info\n", workflow->packets_captured);
       return;
     }
 
@@ -837,14 +845,13 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
 
     flow_to_process->ndpi_flow = (struct ndpi_flow_struct *)ndpi_flow_malloc(SIZEOF_FLOW_STRUCT);
     if (flow_to_process->ndpi_flow == NULL) {
-      fprintf(stderr, "[%8llu, %4u] Not enough memory for flow struct\n", workflow->packets_captured, flow_to_process->flow_id);
+      // fprintf(stderr, "[%8llu, %4u] Not enough memory for flow struct\n", workflow->packets_captured, flow_to_process->flow_id);
       return;
     }
     memset(flow_to_process->ndpi_flow, 0, SIZEOF_FLOW_STRUCT);
     // remove_comment
-        /*
-    printf("[%8llu, %4u] new %sflow\n", workflow->packets_captured, flow_to_process->flow_id, (flow_to_process->is_midstream_flow != 0 ? "midstream-" : ""));
-    */
+    // printf("[%8llu, %4u] new %sflow\n", workflow->packets_captured, flow_to_process->flow_id, (flow_to_process->is_midstream_flow != 0 ? "midstream-" : ""));
+    
     if (ndpi_tsearch(flow_to_process, &workflow->ndpi_flows_active[hashed_index], ndpi_workflow_node_cmp) == NULL) {
       /* Possible Leak, but should not happen as we'd abort earlier. */
       return;
@@ -891,7 +898,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
     flow_to_process->guessed_protocol = ndpi_detection_giveup(workflow->ndpi_struct, flow_to_process->ndpi_flow, 1, &protocol_was_guessed);
     if (protocol_was_guessed != 0) {
       // remove_comment
-        /*
+      /*
       printf("[%8llu, %4d][GUESSED] protocol: %s | app protocol: %s | category: %s\n", 
       workflow->packets_captured,flow_to_process->flow_id,
       ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->guessed_protocol.master_protocol),
@@ -900,7 +907,7 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
       */
     } else {
       // remove_comment
-        /*
+      /*
       printf("[%8llu, %4d][FLOW NOT CLASSIFIED]\n",
 	     workflow->packets_captured, flow_to_process->flow_id);
        */
@@ -918,16 +925,19 @@ static void ndpi_process_packet(struct ndpi_thread *nDPI_thread, struct pcap_pkt
         workflow->detected_flow_protocols++;
         // remove_comment
         /*
-        printf("[%8llu, %4d][DETECTED] protocol: %s | app protocol: %s | category: %s\n",
+        printf("[%8llu, %4d][DETECTED] protocol: %s | app protocol: %s | category: %s | app_protocol_num: %d\n" ,
 	       workflow->packets_captured, flow_to_process->flow_id,
 	       ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.master_protocol),
 	       ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.app_protocol),
-	       ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.category));
-         */
-         apps[flow_to_process->detected_l7_protocol.master_protocol].interval_counter+=pkt_len;
-         apps[flow_to_process->detected_l7_protocol.master_protocol].source_count[flow_to_process->ip_tuple.v4.src%max_src]++;
+	       ndpi_category_get_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.category),
+         flow_to_process->detected_l7_protocol.app_protocol
+         );
+        */
+         apps[flow_to_process->detected_l7_protocol.app_protocol].interval_counter+=pkt_len;
+         apps[flow_to_process->detected_l7_protocol.app_protocol].source_count[flow_to_process->ip_tuple.v4.src%max_src]++;
+         apps[flow_to_process->detected_l7_protocol.app_protocol].app_name = strdup(ndpi_get_proto_name(workflow->ndpi_struct, flow_to_process->detected_l7_protocol.app_protocol));
          if(new_flow)
-          apps[flow_to_process->detected_l7_protocol.master_protocol].new_session+=1;
+          apps[flow_to_process->detected_l7_protocol.app_protocol].new_session+=1;
          /*
          printf("app_types : %d",flow_to_process->detected_l7_protocol.master_protocol);
          printf("\tv_max = %" PRIu64 " v_min = %" PRIu64" ",apps[flow_to_process->detected_l7_protocol.master_protocol].max_counter,apps[flow_to_process->detected_l7_protocol.master_protocol].min_counter);
@@ -1034,7 +1044,7 @@ static int lcore_main(__rte_unused void *dummy){
                     
                         // a time interval passed    
                         clearScreen();
-                        printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
+                        // printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
                         for(int i=0;i<app_types;i++){
                           if (apps[i].interval_counter > apps[i].max_counter)
                             apps[i].max_counter = apps[i].interval_counter;
@@ -1051,7 +1061,7 @@ static int lcore_main(__rte_unused void *dummy){
                 }
                 
                 if(training==true){
-                        printf("#####\n#####\ntraining phase finished: \n");
+                        // printf("#####\n#####\ntraining phase finished: \n");
                         c = 0;
                         training = false;
                         start_time = clock();
@@ -1094,8 +1104,8 @@ static int lcore_main(__rte_unused void *dummy){
                 }
                 // a time interval passed
                 clearScreen();
-                printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
-                for(int rh=0;rh<1;rh++){
+                // printf("Number of packets in %d time interval: %lld\n",c,number_of_packets_in_a_interval);
+                for(int rh=0;rh<app_types;rh++){
                     uint64_t *tmp = malloc(sizeof(uint64_t)*window_size);
                     memcpy(tmp,apps[rh].counter_window,window_size*sizeof(uint64_t));
                     qsort(apps[rh].counter_window, window_size, sizeof(uint64_t), compare);
@@ -1119,23 +1129,24 @@ static int lcore_main(__rte_unused void *dummy){
                     r_u = avg + 3 * sd;
                     r_l = avg - 3 * sd;
                     
-
+                    
                     if (((r_pred > r_u) && (apps[rh].interval_counter>apps[rh].max_counter) && (r_u!=0 && r_l!=0 && r_u!=r_l)) || ((r_pred < r_l) && (apps[rh].interval_counter < apps[rh].min_counter) && (r_u!=0 && r_l!=0 && r_u!=r_l)))
                     {        // alert DDoS detection
-                            printf("A ddos attack has been occured!\n");
+                            printf("A ddos attack has been occured! in Application : %s\n ",apps[rh].app_name);
                     }
                     else {
                       append(apps[rh].ratio_window,window_size,r_pred);
                       append(tmp,window_size,apps[rh].interval_counter);
                       memcpy(apps[rh].counter_window,tmp,window_size*sizeof(uint64_t));
                     }
+                    
                     int src_counter=0;
                     for(int ic=0;ic<max_src;ic++){
                       if(apps[rh].source_count[ic]>0)
                         src_counter++;
                     }
-                    printf("  v_max = %" PRIu64 " v_min = %" PRIu64 " v_pred = %" PRIu64 " uinque_sIP = %d",apps[rh].max_counter,apps[rh].min_counter,v_pred,src_counter);
-                    printf("  interval_counter = %" PRIu64 " new_session = %" PRIu16" ratio_pred = %f\n",apps[rh].interval_counter,apps[rh].new_session,r_pred);
+                    // printf("  v_max = %" PRIu64 " v_min = %" PRIu64 " v_pred = %" PRIu64 " uinque_sIP = %d",apps[rh].max_counter,apps[rh].min_counter,v_pred,src_counter);
+                    // printf("  interval_counter = %" PRIu64 " new_session = %" PRIu16" ratio_pred = %f\n",apps[rh].interval_counter,apps[rh].new_session,r_pred);
                   
                     apps[rh].interval_counter = 0;
                     apps[rh].new_session=0;
@@ -1146,8 +1157,9 @@ static int lcore_main(__rte_unused void *dummy){
                 //print source IP stats
                 if (c%window_size==0){
                    // window size reached
-                   printf("=================\n");
-                    printf("=================\n");
+                  //  printf("=================\n");
+                    // printf("=================\n");
+                   /*
                    for(uint16_t uu=0;uu<max_src;uu++){
                         
                       if(src_stats[uu].total_session>0)
@@ -1155,6 +1167,7 @@ static int lcore_main(__rte_unused void *dummy){
                           
                           printf("%s , %u , %u , %u, %u\n",src_stats[uu].ip_string, src_stats[uu].packet_count, src_stats[uu].total_session, (src_stats[uu].total_session - src_stats[uu].idle_session),src_stats[uu].packet_volume); //uncomment
                     }
+                    */
                    c=0;
                 }
                 
@@ -1199,17 +1212,42 @@ int main(int argc, char *argv[]){
   if (nb_ports==0)
     rte_exit(EXIT_FAILURE, "No Ethernet ports\n");
 
+  int port_cores_assigned = 0;
+
 	/* Initialize the port/queue configuration of each logical core */
+  /*
+  RTE_ETH_FOREACH_DEV(portid){
+    while (rte_lcore_is_enabled(rx_lcore_id) == 0 ){
+      if(port_cores_assigned/MAX_RX_QUEUE_PER_LCORE==portid){
+        port_cores_assigned=0;
+        break;
+      }
+      if(lcore_queue_conf[rx_lcore_id].n_rx_port != MAX_RX_QUEUE_PER_LCORE){
+        qconf = &lcore_queue_conf[rx_lcore_id];
+        qconf->rx_port_list[qconf->n_rx_port] = portid;
+		    qconf->n_rx_port++;
+        printf("Lcore %u: RX port %u\n", rx_lcore_id, portid);
+        port_cores_assigned++;
+      }
+      else if(rx_lcore_id>=RTE_MAX_LCORE && port_cores_assigned==0)
+        rte_exit(EXIT_FAILURE, "Not enough cores\n");
+      rx_lcore_id++;
+    }
+
+  }
+  */
+
+  
 	RTE_ETH_FOREACH_DEV(portid) {
-		/* get the lcore_id for this port */
-		while (rte_lcore_is_enabled(rx_lcore_id) == 0 || lcore_queue_conf[rx_lcore_id].n_rx_port == l2fwd_rx_queue_per_lcore) {
+		//  get the lcore_id for this port 
+		while (rte_lcore_is_enabled(rx_lcore_id) == 0 || lcore_queue_conf[rx_lcore_id].n_rx_port == MAX_RX_QUEUE_PER_LCORE) {
 			rx_lcore_id++;
 			if (rx_lcore_id >= RTE_MAX_LCORE)
 				rte_exit(EXIT_FAILURE, "Not enough cores\n");
 		}
 
 		if (qconf != &lcore_queue_conf[rx_lcore_id]) {
-			/* Assigned a new logical core in the loop above. */
+			// Assigned a new logical core in the loop above.
 			qconf = &lcore_queue_conf[rx_lcore_id];
 			nb_lcores++;
 		}
@@ -1218,8 +1256,8 @@ int main(int argc, char *argv[]){
 		qconf->n_rx_port++;
 		printf("Lcore %u: RX port %u\n", rx_lcore_id, portid);
 	}
+  
 
-  printf( "nb_lcores:%d\n",nb_lcores);
         
   /* Creates a new mbuf mempool in memory to hold the mbufs objects (that store packets).
   containts NUM_MBUFS * nb_ports of mbuf pkts in it with each of them's size is RTE_MBUF_DEFAULT_BUF_SIZE
